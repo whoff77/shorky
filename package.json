@@ -1,0 +1,35 @@
+{
+  "name": "shorky",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whoff77/shorky.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/whoff77/shorky/issues"
+  },
+  "homepage": "https://github.com/whoff77/shorky#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.46.0",
+    "@types/node": "^26.2.0",
+    "playwright": "^1.46.0"
+  },
+  "directories": {
+    "test": "tests"
+  },
+  "dependencies": {
+    "fsevents": "^2.3.2",
+    "playwright-core": "^1.62.1",
+    "undici-types": "^8.3.0"
+  },
+  "allowScripts": {
+    "fsevents@2.3.2": true
+  }
+}
