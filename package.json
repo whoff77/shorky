@@ -17,9 +17,9 @@
   },
   "homepage": "https://github.com/whoff77/shorky#readme",
   "devDependencies": {
-    "@playwright/test": "^1.46.0",
+    "@playwright/test": "^1.62.1",
     "@types/node": "^26.2.0",
-    "playwright": "^1.46.0"
+    "playwright": "^1.62.1"
   },
   "directories": {
     "test": "tests"
