@@ -1,30 +1,71 @@
-import { askLLM } from './llmClient';
+import OpenAI from 'openai';
+import { Page } from '@playwright/test';
+import * as dotenv from 'dotenv';
 
-interface HealRequest {
-  failedSelector: string;
-  domSnippet: string;
+dotenv.config();
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+export async function healSelector(page: Page, failedSelector: string): Promise<string> {
+  const domSnapshot = await page.evaluate(() => {
+    return document.body.innerHTML.slice(0, 4000);
+  });
+
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      {
+        role: 'user',
+        content: `A Playwright test failed clicking selector: "${failedSelector}".
+Here is the raw HTML snapshot of the page:
+\`\`\`html
+${domSnapshot}
+\`\`\`
+Return ONLY the best valid CSS selector to click the intended element (e.g. button[type="submit"]). Do not include any explanation, quotes, or markdown code fences.`,
+      },
+    ],
+    temperature: 0,
+  });
+
+  const healedSelector = response.choices[0]?.message?.content?.trim() || 'button[type="submit"]';
+  return healedSelector;
 }
 
-/**
- * Sends a broken selector and DOM context to the LLM to predict the correct CSS selector.
- */
-export async function healSelector({ failedSelector, domSnippet }: HealRequest): Promise<string> {
-  const prompt = `
-You are an automated self-healing QA engine named Shorky.
-A Playwright test failed because the locator "${failedSelector}" could not be found.
+export async function assertVisual(
+  page: Page,
+  expectationPrompt: string
+): Promise<{ passed: boolean; reason: string }> {
+  // Take screenshot buffer as base64
+  const screenshotBuffer = await page.screenshot({ fullPage: false });
+  const base64Image = screenshotBuffer.toString('base64');
 
-Here is the current HTML context of the page:
-\`\`\`html
-${domSnippet}
-\`\`\`
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o-mini',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: `Analyze this UI screenshot. Expectation: "${expectationPrompt}".
+Does the visual representation satisfy the expectation? Reply ONLY in valid JSON matching this schema:
+{"passed": true|false, "reason": "brief explanation"}`,
+          },
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:image/png;base64,${base64Image}`,
+            },
+          },
+        ],
+      },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0,
+  });
 
-Task:
-Analyze the HTML snippet and identify the correct, valid CSS selector for the intended target element.
-Return ONLY the raw CSS selector string (e.g., button[type="submit"] or #username). 
-Do NOT include markdown formatting, code blocks, quotes, or explanation.
-`;
-
-  const suggestedSelector = await askLLM(prompt);
-  // Strip any accidental markdown formatting returned by the LLM
-  return suggestedSelector.replace(/```/g, '').trim();
+  const content = response.choices[0]?.message?.content || '{}';
+  return JSON.parse(content);
 }
