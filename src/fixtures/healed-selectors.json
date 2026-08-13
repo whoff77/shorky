@@ -1,2 +1,4 @@
 {
+  "#broken-login-button-xyz": "button[type=\"submit\"]",
+  "#broken-submit-button-xyz": "button[type=\"submit\"]"
 }
