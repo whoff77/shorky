@@ -1,9 +1,9 @@
 import { Page, expect } from '@playwright/test';
 
 export interface VisualDiffOptions {
-  threshold?: number;           // Color sensitivity (0.0 to 1.0). Default: 0.1
-  maxDiffPixelRatio?: number;   // Max allowed mismatched pixel ratio. Default: 0.01 (1%)
-  maskSelectors?: string[];     // Selectors to mask out (timestamps, avatars, banners)
+  threshold?: number;
+  maxDiffPixelRatio?: number;
+  maskSelectors?: string[];
 }
 
 export async function assertVisualBaseline(
