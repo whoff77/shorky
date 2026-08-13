@@ -5,7 +5,9 @@ test('Log in and assert secure area dashboard', async ({ autoHealPage }) => {
   const url = 'https://the-internet.herokuapp.com/login';
   const usernameSelector = '#username';
   const passwordSelector = '#password';
-  const loginButtonSelector = 'button[type="submit"]';
+  
+  // Intentionally broken selector to force Shorky to heal live in CI
+  const loginButtonSelector = '#broken-login-button-xyz';
   const prompt = 'Secure Area';
 
   await page.goto(url);
