@@ -7,7 +7,7 @@ test('Log in and assert secure area dashboard', async ({ autoHealPage }) => {
   const passwordSelector = '#password';
   
   // Intentionally broken selector to force Shorky to heal live in CI
-  const loginButtonSelector = 'button#broken-btn-2026a';
+  const loginButtonSelector = 'button#broken-btn-2026b';
   const prompt = 'Secure Area';
 
   await page.goto(url);
