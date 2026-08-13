@@ -34,13 +34,14 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: npx playwright test --project="Google Chrome"
 
+      # Only run code refactoring and PR creation on push to main (not on pull_request events)
       - name: Refactor Spec Source Files with Healed Selectors
-        if: always()
+        if: always() && github.event_name == 'push'
         run: npx tsx scripts/apply-healed-selectors.ts
 
       - name: Create Self-Healing Pull Request
         uses: peter-evans/create-pull-request@v6
-        if: always()
+        if: always() && github.event_name == 'push'
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           base: main
