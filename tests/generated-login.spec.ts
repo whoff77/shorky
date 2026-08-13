@@ -11,13 +11,13 @@ test('Log in and assert secure area dashboard', async ({ autoHealPage }) => {
 
   // 🧪 ARTIFICIAL FAILURE INJECTION:
   // Inject CSS to move the heading and make the button bright neon purple
-  await page.evaluate(() => {
-    const heading = document.querySelector('h2');
-    if (heading instanceof HTMLElement) heading.style.marginTop = '100px';
+  // await page.evaluate(() => {
+  //   const heading = document.querySelector('h2');
+  //   if (heading instanceof HTMLElement) heading.style.marginTop = '100px';
 
-    const logoutBtn = document.querySelector('a.button');
-    if (logoutBtn instanceof HTMLElement) logoutBtn.style.backgroundColor = 'purple';
-  });
+  //   const logoutBtn = document.querySelector('a.button');
+  //   if (logoutBtn instanceof HTMLElement) logoutBtn.style.backgroundColor = 'purple';
+  // });
 
   await assertVisualBaseline('login-page-baseline', {
     threshold: 0.1,
