@@ -1,5 +1,6 @@
 import { test as baseTest, Page, expect } from '@playwright/test';
 import { healSelector, assertVisual } from '../utils/healingEngine';
+import { assertVisualBaseline, VisualDiffOptions } from '../utils/visual-diff';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -30,6 +31,7 @@ export type AutoHealFixtures = {
     page: Page;
     clickAndHeal: (selector: string) => Promise<void>;
     assertVisual: (expectation: string) => Promise<void>;
+    assertVisualBaseline: (snapshotName: string, options?: VisualDiffOptions) => Promise<void>;
   };
 };
 
@@ -71,7 +73,16 @@ export const test = baseTest.extend<AutoHealFixtures>({
       }
     };
 
-    await use({ page, clickAndHeal, assertVisual: runVisualCheck });
+    const runVisualBaseline = async (snapshotName: string, options?: VisualDiffOptions) => {
+      await assertVisualBaseline(page, snapshotName, options ?? {});
+    };
+
+    await use({
+      page,
+      clickAndHeal,
+      assertVisual: runVisualCheck,
+      assertVisualBaseline: runVisualBaseline,
+    });
   },
 });
 
