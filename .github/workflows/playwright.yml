@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -41,6 +43,7 @@ jobs:
         if: always()
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          base: main
           commit-message: "chore(shorky): auto-heal broken test selectors in source code"
           branch: "shorky/auto-heal-selectors"
           delete-branch: true
