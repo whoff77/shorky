@@ -7,7 +7,7 @@ const TESTS_DIR = path.join(__dirname, '../tests');
 function applyHealedSelectors() {
   if (!fs.existsSync(HEALED_JSON_PATH)) {
     console.log('No healed selectors registry found.');
-    return;
+    process.exit(0);
   }
 
   const rawData = fs.readFileSync(HEALED_JSON_PATH, 'utf-8');
@@ -16,14 +16,12 @@ function applyHealedSelectors() {
   const brokenSelectors = Object.keys(healedMap);
   if (brokenSelectors.length === 0) {
     console.log('✨ No new healed selectors to apply.');
-    return;
+    process.exit(0);
   }
 
   console.log(`🔍 Found ${brokenSelectors.length} healed selector(s). Refactoring spec files...`);
 
-  // Scan all test files in tests/
   const testFiles = fs.readdirSync(TESTS_DIR).filter(f => f.endsWith('.spec.ts') || f.endsWith('.test.ts'));
-
   let changesMade = 0;
 
   for (const file of testFiles) {
@@ -33,7 +31,6 @@ function applyHealedSelectors() {
 
     for (const [broken, fixed] of Object.entries(healedMap)) {
       if (content.includes(broken)) {
-        // Replace all occurrences of the broken selector string with the fixed one
         content = content.replaceAll(broken, fixed);
         fileModified = true;
         changesMade++;
@@ -46,10 +43,13 @@ function applyHealedSelectors() {
     }
   }
 
-  if (changesMade > 0) {
-    // Reset the cache file back to empty since specs are now fixed directly in code
-    fs.writeFileSync(HEALED_JSON_PATH, JSON.stringify({}, null, 2), 'utf-8');
-    console.log('✅ Applied selector fixes to source code and reset local cache registry.');
+  // Always clear the JSON cache file so it stays empty on main
+  fs.writeFileSync(HEALED_JSON_PATH, JSON.stringify({}, null, 2), 'utf-8');
+
+  if (changesMade === 0) {
+    console.log('ℹ️ No spec files contained matching broken selector strings.');
+  } else {
+    console.log(`✅ Refactored ${changesMade} selector(s) across spec files and cleared cache.`);
   }
 }
 
