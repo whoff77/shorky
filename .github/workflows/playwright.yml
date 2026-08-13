@@ -32,18 +32,24 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: npx playwright test --project="Google Chrome"
 
-      - name: Commit Updated Healed Selectors (Cache Persistence)
+      - name: Refactor Spec Source Files with Healed Selectors
         if: always()
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add src/fixtures/healed-selectors.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore(shorky): persist self-healed selectors from CI run" && git push)
+        run: npx tsx scripts/apply-healed-selectors.ts
 
-      - name: Upload Playwright Report
-        uses: actions/upload-artifact@v4
+      - name: Create Self-Healing Pull Request
+        uses: peter-evans/create-pull-request@v6
         if: always()
         with:
-          name: playwright-report
-          path: playwright-report/
-          retention-days: 7
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(shorky): auto-heal broken test selectors in source code"
+          branch: "shorky/auto-heal-selectors"
+          delete-branch: true
+          title: "🤖 Shorky AI: Auto-Healed Selectors Proposed Code Fix"
+          body: |
+            ## 🩹 Shorky Self-Healing Report
+
+            Shorky detected broken locators during this test run, repaired them using live DOM analysis, and updated the source `.spec.ts` files accordingly.
+
+            ### Proposed Changes
+            Review the file diff below. If the new locators accurately reflect your frontend UI, merge this PR to keep your test specs clean!
+          labels: "automated-pr, shorky-ai"
