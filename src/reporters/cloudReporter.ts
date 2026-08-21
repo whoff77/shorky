@@ -2,29 +2,26 @@ import { Reporter, FullConfig, Suite, TestCase, TestResult, FullResult } from '@
 import fs from 'fs';
 import path from 'path';
 
-interface ShorkyRunPayload {
-  apiKey: string;
-  projectName: string;
-  branch: string;
-  commitSha: string;
-  status: string;
-  durationMs: number;
-  generatedSpec?: string;
-  visualDiffs: Array<{ name: string; base64Image: string }>;
-  traceLogs: object[];
+interface TestRunItem {
+  title: string;
+  status: 'passed' | 'failed' | 'healed';
 }
 
 export default class ShorkyCloudReporter implements Reporter {
   private apiEndpoint: string;
   private apiKey: string;
-  private runData: Partial<ShorkyRunPayload>;
+  private testItems: TestRunItem[] = [];
+  private runData: {
+    passed: number;
+    failed: number;
+  };
 
   constructor() {
-    this.apiEndpoint = process.env.SHORKY_CLOUD_URL || 'https://api.shorky.dev/v1/runs';
+    this.apiEndpoint = process.env.SHORKY_CLOUD_URL || 'http://localhost:3000/api/v1/telemetry';
     this.apiKey = process.env.SHORKY_CLOUD_API_KEY || '';
     this.runData = {
-      visualDiffs: [],
-      traceLogs: []
+      passed: 0,
+      failed: 0,
     };
   }
 
@@ -39,57 +36,64 @@ export default class ShorkyCloudReporter implements Reporter {
   onTestEnd(test: TestCase, result: TestResult) {
     if (!this.apiKey) return;
 
-    // Capture visual diff artifacts if present
-    const diffAttachments = result.attachments.filter(a => a.name.includes('diff') && a.path);
-    for (const attachment of diffAttachments) {
-      if (attachment.path && fs.existsSync(attachment.path)) {
-        const imageBuffer = fs.readFileSync(attachment.path);
-        this.runData.visualDiffs?.push({
-          name: attachment.name,
-          base64Image: imageBuffer.toString('base64')
-        });
-      }
+    let testStatus: 'passed' | 'failed' | 'healed' = 'passed';
+
+    if (result.status === 'passed') {
+      this.runData.passed++;
+      testStatus = 'passed';
+    } else if (result.status === 'failed' || result.status === 'timedOut') {
+      this.runData.failed++;
+      testStatus = 'failed';
     }
+
+    this.testItems.push({
+      title: test.title,
+      status: testStatus,
+    });
   }
 
   async onEnd(result: FullResult) {
     if (!this.apiKey) return;
 
-    // Collect generated spec file output if generator.ts ran
-    const generatedSpecPath = path.join(process.cwd(), 'tests', 'generated-login.spec.ts');
-    let generatedSpecContent: string | undefined;
-    if (fs.existsSync(generatedSpecPath)) {
-      generatedSpecContent = fs.readFileSync(generatedSpecPath, 'utf-8');
-    }
-
-    // Enrich traceLogs with the ReAct agent's reasoning/action/self-healing trace
-    // persisted by src/agent/generator.ts (tests/generated-login.trace.json).
+    // Load agent trace logs if generated
     const generatedTracePath = path.join(process.cwd(), 'tests', 'generated-login.trace.json');
-    let agentTraceLogs: object[] = [];
+    let agentTraceLogs: any[] = [];
     if (fs.existsSync(generatedTracePath)) {
       try {
         const rawTrace = fs.readFileSync(generatedTracePath, 'utf-8');
         const parsedTrace = JSON.parse(rawTrace || '[]');
         if (Array.isArray(parsedTrace)) {
-          agentTraceLogs = parsedTrace;
+          // Format entries to satisfy agentTraceEntrySchema if necessary
+          agentTraceLogs = parsedTrace.map((entry: any, index: number) => ({
+            step: typeof entry.step === 'number' ? entry.step : index + 1,
+            action: entry.action || entry.type || 'agent_step',
+            status: entry.status === 'healed' ? 'healed' : entry.status === 'failed' ? 'failed' : 'success',
+            timestamp: entry.timestamp || new Date().toISOString(),
+            selector: entry.selector,
+            message: entry.message || entry.thought,
+            healedFrom: entry.healedFrom,
+            healedTo: entry.healedTo,
+            durationMs: typeof entry.durationMs === 'number' ? Math.round(entry.durationMs) : undefined,
+          }));
         }
       } catch (err) {
         console.warn('⚠️ [Shorky Cloud] Failed to parse generated-login.trace.json:', err);
       }
     }
 
-    const payload: ShorkyRunPayload = {
-      apiKey: this.apiKey,
-      projectName: process.env.SHORKY_PROJECT_NAME || 'default-project',
-      branch: process.env.GITHUB_REF_NAME || 'local',
-      commitSha: process.env.GITHUB_SHA || 'dev',
-      status: result.status,
-      durationMs: result.duration,
-      generatedSpec: generatedSpecContent,
-      visualDiffs: this.runData.visualDiffs || [],
-      traceLogs: [...(this.runData.traceLogs || []), ...agentTraceLogs]
+    const payload = {
+      projectName: process.env.SHORKY_PROJECT_NAME || 'Default Local Project',
+      status: result.status === 'passed' ? 'passed' : 'failed',
+      passedCount: this.runData.passed,
+      failedCount: this.runData.failed,
+      durationMs: Math.round(result.duration),
+      tests: this.testItems.map((t) => ({
+        testName: t.title,
+        status: t.status,
+        traceLogs: agentTraceLogs,
+        selfHealingCount: agentTraceLogs.filter((log) => log.status === 'healed').length,
+      })),
     };
-
 
     console.log(`📤 [Shorky Cloud] Transmitting run artifacts to ${this.apiEndpoint}...`);
 
@@ -98,15 +102,17 @@ export default class ShorkyCloudReporter implements Reporter {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiKey}`
+          'x-shorky-api-key': this.apiKey,
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       });
 
       if (response.ok) {
-        console.log('✅ [Shorky Cloud] Run artifacts successfully published.');
+        const resData = await response.json();
+        console.log(`✅ [Shorky Cloud] Run artifacts successfully published! (Run ID: ${resData.runId})`);
       } else {
-        console.error(`⚠️ [Shorky Cloud] Failed to send report: ${response.statusText}`);
+        const errText = await response.text().catch(() => '');
+        console.error(`⚠️ [Shorky Cloud] Failed to send report (${response.status}): ${response.statusText} ${errText}`);
       }
     } catch (error) {
       console.error('❌ [Shorky Cloud] Connection error posting execution data:', error);
