@@ -1,6 +1,6 @@
 import { Page } from '@playwright/test';
 import OpenAI from 'openai';
-import { SHORKY_AGENT_TOOLS, executeAgentTool } from './tools';
+import { SHORKY_AGENT_TOOLS, executeAgentTool, AgentTraceEntry } from './tools';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -17,6 +17,7 @@ export interface AgentRunResult {
   stepsExecuted: number;
   finalAnswer: string;
   history: string[];
+  traceLogs: AgentTraceEntry[];
 }
 
 /**
@@ -29,8 +30,14 @@ export async function runAgentGoal(
 ): Promise<AgentRunResult> {
   const { goal, maxSteps = 10, autoHealPage } = options;
   const historyLog: string[] = [];
+  const traceLogs: AgentTraceEntry[] = [];
+
+  const pushTrace = (entry: Omit<AgentTraceEntry, 'timestamp'>) => {
+    traceLogs.push({ timestamp: new Date().toISOString(), ...entry });
+  };
 
   console.log(`\n🤖 [Shorky Agent Starting] Goal: "${goal}"`);
+  pushTrace({ type: 'thought', detail: `Agent starting with goal: "${goal}"` });
 
   // Initial System Prompt establishing the ReAct persona and rules
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -44,10 +51,13 @@ Workflow Rules:
 1. First, inspect the current DOM state using 'inspectDOM' or navigate to the target page if not already there.
 2. Analyze the interactive elements available on the page.
 3. Formulate a logical step-by-step plan.
-4. Execute tool calls ('fillInput', 'clickElement', 'navigate', etc.) to interact with the application.
+4. Execute tool calls ('fillInput', 'clickElement', 'selectOption', 'uploadFile', 'keyboardPress', 'navigate', etc.) to interact with the application.
 5. After completing key actions, evaluate page state using 'evaluateState'.
-6. If an action fails, inspect the DOM again and adjust your selector or strategy.
-7. Once the goal is completely achieved, respond with a final text message confirming completion.`
+6. If an action fails, inspect the DOM again and adjust your selector or strategy. The underlying tools already attempt automatic selector fallback/self-healing, but you should still reason about better selectors when repeated failures occur.
+7. Use 'selectOption' for both native <select> dropdowns and custom ARIA-based dropdown widgets.
+8. Use 'uploadFile' for any <input type="file"> elements, providing local file paths.
+9. Use 'keyboardPress' for keys like Enter, Tab, or Escape when needed to submit forms or dismiss elements.
+10. Once the goal is completely achieved, respond with a final text message confirming completion.`
     },
     {
       role: 'user',
@@ -79,6 +89,7 @@ Workflow Rules:
     if (responseMessage.content) {
       console.log(`💭 [Agent Thought]: ${responseMessage.content}`);
       historyLog.push(`Thought: ${responseMessage.content}`);
+      pushTrace({ type: 'thought', detail: responseMessage.content });
     }
 
     // 2. ACT: Check if model invoked any function tools
@@ -99,7 +110,7 @@ Workflow Rules:
         console.log(`⚡ [Agent Action]: Calling ${functionName}(${JSON.stringify(functionArgs)})`);
 
         // Execute the tool in the live Playwright context
-        const observation = await executeAgentTool(page, functionName, functionArgs, autoHealPage);
+        const observation = await executeAgentTool(page, functionName, functionArgs, autoHealPage, traceLogs);
         console.log(`👁️ [Agent Observation]: ${observation.slice(0, 150)}${observation.length > 150 ? '...' : ''}`);
 
         historyLog.push(`Action: ${functionName}(${JSON.stringify(functionArgs)}) -> ${observation}`);
@@ -116,12 +127,14 @@ Workflow Rules:
       isGoalComplete = true;
       finalAnswer = responseMessage.content;
       console.log(`\n🎉 [Agent Completed Goal]: ${finalAnswer}`);
+      pushTrace({ type: 'thought', detail: `Agent concluded goal is complete: ${finalAnswer}` });
     }
   }
 
   if (!isGoalComplete && stepCount >= maxSteps) {
     console.warn(`⚠️ [Agent Warning]: Reached max step limit (${maxSteps}) without completing goal.`);
     finalAnswer = `Agent reached maximum steps (${maxSteps}) before reaching conclusion.`;
+    pushTrace({ type: 'heal-failure', detail: finalAnswer });
   }
 
   // Single top-level return statement satisfying Promise<AgentRunResult>
@@ -130,5 +143,6 @@ Workflow Rules:
     stepsExecuted: stepCount,
     finalAnswer: finalAnswer || 'Agent execution completed.',
     history: historyLog,
+    traceLogs,
   };
 }

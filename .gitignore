@@ -7,3 +7,7 @@ node_modules/
 /playwright/.cache/
 /playwright/.auth/
 .env
+# Shorky generated test specs & trace logs
+tests/generated-*.spec.ts
+tests/generated-*.trace.json
+*.trace.json
