@@ -5,18 +5,15 @@ import path from 'path';
 // Load environment variables from .env file
 dotenv.config({ path: path.resolve(__dirname, '.env') });
 
-/**
- * Read environment variables from file.
- * https://github.com/motdotla/dotenv
- */
-// import dotenv from 'dotenv';
-// import path from 'path';
-// dotenv.config({ path: path.resolve(__dirname, '.env') });
+const reporters: any[] = [
+  ['list'],
+  ['html', { open: 'never' }]
+];
 
-/**
- * See https://playwright.dev/docs/test-configuration.
- */
-
+// Only add Shorky Cloud reporter if explicitly enabled or URL is provided
+if (process.env.SHORKY_CLOUD_URL || process.env.ENABLE_SHORKY_CLOUD === 'true') {
+  reporters.push(['./src/reporters/cloudReporter.ts']);
+}
 
 export default defineConfig({
   testDir: './tests',
@@ -29,11 +26,7 @@ export default defineConfig({
   /* Opt out of parallel tests on CI. */
   workers: process.env.CI ? 1 : undefined,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
-  reporter: [
-    ['html'],
-    ['list'],
-    ['./src/reporters/cloudReporter.ts']
-  ],
+  reporter: reporters,
   snapshotPathTemplate: '{testDir}/__snapshots__/{testFilePath}/{arg}{ext}',
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
   use: {

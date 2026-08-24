@@ -1,0 +1,63 @@
+// src/engine/codeFixer.ts
+import { OpenAI } from 'openai';
+import { TraceFailureContext } from './traceParser';
+
+export interface FixResult {
+  originalCode: string;
+  fixedCode: string;
+  explanation: string;
+}
+
+export async function generateSpecFix(
+  specCode: string,
+  failureContext: TraceFailureContext
+): Promise<FixResult> {
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+  const prompt = `
+You are an expert SDET specializing in Playwright TypeScript test automation.
+A Playwright test failed with the following execution context:
+
+- Failing Action: ${failureContext.actionMethod || 'Unknown'}
+- Failing Selector: ${failureContext.failedSelector || 'Unknown'}
+- Error Message: ${failureContext.errorMessage || 'Timeout'}
+
+DOM SNAPSHOT AT FAILURE:
+\`\`\`html
+${failureContext.domSnapshot || 'No HTML snapshot available'}
+\`\`\`
+
+ORIGINAL SPEC FILE:
+\`\`\`typescript
+${specCode}
+\`\`\`
+
+TASK:
+1. Examine the DOM snapshot HTML to see what elements actually exist on the page.
+2. If the original action attempted to click a non-existent element (e.g. submit button on a form that uses Enter key or placeholder inputs), refactor the spec to interact with elements that actually exist in the DOM (e.g. filling an input field and pressing Enter).
+3. Do NOT alter assertions or test intent—only replace invalid locators or missing actions with valid Playwright methods matching the DOM.
+4. Return valid JSON matching:
+
+{
+  "explanation": "Brief 1-2 sentence explanation of the fix based on the DOM state",
+  "fixedCode": "COMPLETE_UPDATED_TYPESCRIPT_CODE"
+}
+`;
+
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: prompt }],
+    response_format: { type: 'json_object' },
+    temperature: 0.1,
+  });
+
+  const content = response.choices[0].message.content;
+  if (!content) throw new Error('LLM returned empty response');
+
+  const parsed = JSON.parse(content);
+  return {
+    originalCode: specCode,
+    fixedCode: parsed.fixedCode,
+    explanation: parsed.explanation,
+  };
+}
