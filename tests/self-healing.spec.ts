@@ -11,7 +11,7 @@ test.describe('Shorky Self-Healing Suite', () => {
     await page.fill('#password', 'SuperSecretPassword!');
 
     // Pass an INTENTIONALLY BROKEN selector to our self-healing handler
-    await clickAndHeal('button[type="sumbmit"]');
+    await clickAndHeal('button[type="submit"]');
 
     // Verify successful login navigation post-healing
     await expect(page.locator('#flash')).toContainText('You logged into a secure area!');
