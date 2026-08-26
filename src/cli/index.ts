@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { spawn } from 'child_process';
+import { findLatestTraceZip, extractSpecPathFromTrace } from '../engine/traceParser';
+import { runOfflineFix } from './fixTrace';
+import dotenv from 'dotenv';
 
+dotenv.config();
 const program = new Command();
 
 program
@@ -41,6 +45,37 @@ function printBanner(options: {
   console.log('———————————————————————————————————————————————————————————\n');
 }
 
+/**
+ * Locates the most recently created trace.zip under test-results/, resolves
+ * its associated failing spec file, and runs the offline self-healing fixer
+ * against it. Used as a fallback when Playwright exits non-zero and
+ * `--heal` is enabled.
+ */
+async function handleHealOnFailure(): Promise<void> {
+  console.log('\n🩹 [Shorky] --heal enabled. Attempting automatic self-healing fix...');
+
+  const tracePath = findLatestTraceZip();
+  if (!tracePath) {
+    console.warn('⚠️ [Shorky] No trace.zip found under test-results/. Skipping self-healing.');
+    return;
+  }
+
+  const specPath = extractSpecPathFromTrace(tracePath);
+  if (!specPath) {
+    console.warn(`⚠️ [Shorky] Could not resolve failing spec path for trace: ${tracePath}. Skipping self-healing.`);
+    return;
+  }
+
+  console.log(`🔎 [Shorky] Found trace: ${tracePath}`);
+  console.log(`🔎 [Shorky] Resolved failing spec: ${specPath}`);
+
+  try {
+    await runOfflineFix({ tracePath, specPath });
+  } catch (error) {
+    console.error('❌ [Shorky] Self-healing attempt failed:', error instanceof Error ? error.message : error);
+  }
+}
+
 program
   .command('run')
   .description('Run Shorky/Playwright tests with AI-powered self-healing and vision capabilities')
@@ -77,6 +112,10 @@ program
       args.push('--headed');
     }
 
+    if (options.heal) {
+      args.push('--trace=on');
+    }
+
     console.log(`⚡ [Shorky] Executing: npx ${args.join(' ')}\n`);
 
     const child = spawn('npx', args, {
@@ -89,10 +128,16 @@ program
     child.on('exit', (code) => {
       if (code === 0) {
         console.log('\n✅ [Shorky] Test run completed successfully.');
-      } else {
-        console.error(`\n⚠️ [Shorky] Test run exited with code ${code}.`);
+        process.exit(code);
       }
-      process.exit(code ?? 1);
+
+      console.error(`\n⚠️ [Shorky] Test run exited with code ${code}.`);
+
+      if (options.heal) {
+        void handleHealOnFailure().finally(() => process.exit(code ?? 1));
+      } else {
+        process.exit(code ?? 1);
+      }
     });
 
     child.on('error', (err) => {

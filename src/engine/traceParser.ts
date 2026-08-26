@@ -49,6 +49,52 @@ export function findLatestTraceZip(baseDir = 'test-results'): string | null {
 }
 
 
+/**
+ * Attempts to determine the failing spec file path associated with a given
+ * trace.zip artifact.
+ *
+ * Strategy:
+ * 1. Look for an `error-context.md` file alongside the trace.zip (Playwright
+ *    writes one per failing test into the same test-results subfolder) and
+ *    parse its `Location: <path>:<line>:<col>` line.
+ * 2. Fall back to inferring the spec file from the trace folder name (e.g.
+ *    `broken-login-user-should-be-able-to-log-in-Google-Chrome`) by matching
+ *    its slug prefix against the spec files present in `testDir`.
+ */
+export function extractSpecPathFromTrace(traceZipPath: string, testDir = 'tests'): string | null {
+  const traceDir = path.dirname(traceZipPath);
+
+  // 1. Prefer the explicit "Location:" reference inside error-context.md
+  const errorContextPath = path.join(traceDir, 'error-context.md');
+  if (fs.existsSync(errorContextPath)) {
+    const contents = fs.readFileSync(errorContextPath, 'utf-8');
+    const match = contents.match(/Location:\s*([^\s:]+):\d+:\d+/);
+    if (match) {
+      return match[1];
+    }
+  }
+
+  // 2. Fall back to matching the trace folder name against known spec files
+  if (fs.existsSync(testDir)) {
+    const folderName = path.basename(traceDir);
+    const specFiles = fs
+      .readdirSync(testDir)
+      .filter((f) => f.endsWith('.spec.ts') || f.endsWith('.test.ts'));
+
+    const slugify = (value: string) =>
+      value.replace(/\.(spec|test)\.ts$/, '').replace(/[^a-zA-Z0-9]+/g, '-').toLowerCase();
+
+    const normalizedFolder = folderName.toLowerCase();
+    const bestMatch = specFiles.find((file) => normalizedFolder.startsWith(slugify(file)));
+
+    if (bestMatch) {
+      return path.join(testDir, bestMatch);
+    }
+  }
+
+  return null;
+}
+
 export async function parsePlaywrightTrace(traceZipPath: string): Promise<TraceFailureContext> {
   const extractDir = path.join(process.cwd(), '.shorky-temp-trace');
 

@@ -1,1 +1,3 @@
-{}
+{
+  "button[type=\"sumbmit\"]": "button[type=\"submit\"]"
+}
