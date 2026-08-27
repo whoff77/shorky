@@ -34,26 +34,33 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: npx playwright test --project="Google Chrome"
 
-      # Only run code refactoring and PR creation on push to main (not on pull_request events)
+      - name: Run Shorky Playwright Tests
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: npx playwright test --project="Google Chrome"
+
+      # Step 1: Run Shorky's trace fixer on failure to generate the fix
+      - name: Run Shorky Fix Analyzer on Failed Trace
+        if: failure() && github.event_name == 'push'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          npx tsx src/cli/index.ts fix \
+            --trace test-results/broken-login-user-should-be-able-to-log-in-Google-Chrome-retry2/trace.zip \
+            --spec tests/broken-login.spec.ts
+
+      # Step 2: Apply healed selectors (if your architecture uses a mapping script)
       - name: Refactor Spec Source Files with Healed Selectors
         if: always() && github.event_name == 'push'
         run: npx tsx scripts/apply-healed-selectors.ts
 
-      - name: Create Self-Healing Pull Request
-        uses: peter-evans/create-pull-request@v6
+      # Step 3: Create PR with changes using peter-evans/create-pull-request
+      - name: Create Pull Request for Healed Tests
         if: always() && github.event_name == 'push'
+        uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          base: main
-          commit-message: "chore(shorky): auto-heal broken test selectors in source code"
+          commit-message: "fix(auto-heal): repair broken selectors in spec"
+          title: "fix(auto-heal): automated Playwright spec repair"
           branch: "shorky/auto-heal-selectors"
-          delete-branch: true
-          title: "🤖 Shorky AI: Auto-Healed Selectors Proposed Code Fix"
-          body: |
-            ## 🩹 Shorky Self-Healing Report
-
-            Shorky detected broken locators during this test run, repaired them using live DOM analysis, and updated the source `.spec.ts` files accordingly.
-
-            ### Proposed Changes
-            Review the file diff below. If the new locators accurately reflect your frontend UI, merge this PR to keep your test specs clean!
-          labels: "automated-pr, shorky-ai"
+          base: "main"

@@ -4,8 +4,8 @@ test('user should be able to log in', async ({ page }) => {
   await page.goto('https://the-internet.herokuapp.com/login');
 
   // Fill in the username and password fields using accessible role/label locators
-  await page.getByLabel('Ussername').fill('tomsmith');
-  await page.getByLabel('Paassword').fill('SuperSecretPassword!');
+  await page.getByLabel('Username').fill('tomsmith');
+  await page.getByLabel('Password').fill('SuperSecretPassword!');
 
   // Click the login button
   await page.getByRole('button', { name: 'Login' }).click();
