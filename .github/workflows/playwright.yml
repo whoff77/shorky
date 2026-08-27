@@ -39,16 +39,29 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          echo "🔍 Locating failed test traces..."
+          echo "🔍 Locating failed test traces and matching specs..."
+
           find test-results -name "trace.zip" | while read -r TRACE_FILE; do
-            echo "Processing trace: $TRACE_FILE"
+            TRACE_DIR=$(dirname "$TRACE_FILE")
             
-            # Extract spec name from trace directory name (e.g. broken-login -> tests/broken-login.spec.ts)
-            SPEC_NAME=$(echo "$TRACE_FILE" | sed -E 's|.*test-results/([^-]+)-.*|\1|')
-            SPEC_PATH="tests/${SPEC_NAME}.spec.ts"
-            
-            echo "Targeting spec: $SPEC_PATH"
-            npx tsx src/cli/fixTrace.ts --trace "$TRACE_FILE" --spec "$SPEC_PATH"
+            # 1. Extract the exact failing spec file from error-context.md or runner logs
+            SPEC_PATH=$(grep -oE '[a-zA-Z0-9_\/-]+\.spec\.[tj]s' "$TRACE_DIR/error-context.md" | head -n 1)
+
+            # 2. Fallback: search for any spec matching the folder prefix if error-context.md isn't present
+            if [ -z "$SPEC_PATH" ]; then
+              DIR_NAME=$(basename "$TRACE_DIR")
+              SPEC_NAME=$(echo "$DIR_NAME" | cut -d'-' -f1)
+              SPEC_PATH=$(find tests -name "${SPEC_NAME}*.spec.[tj]s" | head -n 1)
+            fi
+
+            if [ -n "$SPEC_PATH" ] && [ -f "$SPEC_PATH" ]; then
+              echo "🎯 Target Spec Found: $SPEC_PATH"
+              echo "📦 Trace File: $TRACE_FILE"
+              
+              npx tsx src/cli/fixTrace.ts --trace "$TRACE_FILE" --spec "$SPEC_PATH"
+            else
+              echo "⚠️ Could not automatically resolve spec file for trace in $TRACE_DIR"
+            fi
           done
 
       - name: Refactor Spec Source Files with Healed Selectors
