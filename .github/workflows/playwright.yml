@@ -42,7 +42,13 @@ jobs:
           echo "🔍 Locating failed test traces..."
           find test-results -name "trace.zip" | while read -r TRACE_FILE; do
             echo "Processing trace: $TRACE_FILE"
-            npx tsx src/cli/fixTrace.ts --trace "$TRACE_FILE"
+            
+            # Extract spec name from trace directory name (e.g. broken-login -> tests/broken-login.spec.ts)
+            SPEC_NAME=$(echo "$TRACE_FILE" | sed -E 's|.*test-results/([^-]+)-.*|\1|')
+            SPEC_PATH="tests/${SPEC_NAME}.spec.ts"
+            
+            echo "Targeting spec: $SPEC_PATH"
+            npx tsx src/cli/fixTrace.ts --trace "$TRACE_FILE" --spec "$SPEC_PATH"
           done
 
       - name: Refactor Spec Source Files with Healed Selectors
