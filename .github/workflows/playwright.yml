@@ -64,15 +64,25 @@ jobs:
                 for (const test of spec.tests || []) {
                   for (const result of test.results || []) {
                     if (result.status === "timedOut" || result.status === "failed") {
-                      const relativeSpecPath = path.relative(process.cwd(), spec.file);
+                      // Ensure relative path includes tests/ directory
+                      let relativeSpecPath = path.relative(process.cwd(), spec.file);
+                      if (!relativeSpecPath.startsWith("tests/")) {
+                        relativeSpecPath = path.join("tests", relativeSpecPath);
+                      }
+
                       const traceAttachment = result.attachments?.find(a => a.name === "trace");
                       
                       if (traceAttachment && traceAttachment.path) {
-                        console.log(`🎯 Found failed spec: ${relativeSpecPath}`);
-                        console.log(`📦 Found trace zip: ${traceAttachment.path}`);
+                        console.log(`🎯 Target Spec: ${relativeSpecPath}`);
+                        console.log(`📦 Trace Zip: ${traceAttachment.path}`);
                         
-                        const cmd = `npx tsx src/cli/fixTrace.ts --trace "${traceAttachment.path}" --spec "${relativeSpecPath}"`;
-                        execSync(cmd, { stdio: "inherit" });
+                        try {
+                          const cmd = `npx tsx src/cli/fixTrace.ts --trace "${traceAttachment.path}" --spec "${relativeSpecPath}"`;
+                          console.log(`🚀 Executing: ${cmd}`);
+                          execSync(cmd, { stdio: "inherit" });
+                        } catch (err) {
+                          console.error(`❌ Error running fixTrace for ${relativeSpecPath}:`, err.message);
+                        }
                       }
                     }
                   }
