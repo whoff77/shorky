@@ -32,37 +32,56 @@ jobs:
       - name: Run Shorky Playwright Tests
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: npx playwright test --project="Google Chrome"
+        run: npx playwright test --project="Google Chrome" --reporter=json,list > test-results/report.json || true
 
       - name: Run Shorky Fix Analyzer on Failed Traces
         if: failure() && github.event_name == 'push'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          echo "🔍 Locating failed test traces and matching specs..."
+          echo "🔍 Resolving failed specs and traces from Playwright JSON report..."
 
-          find test-results -name "trace.zip" | while read -r TRACE_FILE; do
-            TRACE_DIR=$(dirname "$TRACE_FILE")
+          npx tsx -e '
+            import fs from "fs";
+            import path from "path";
+            import { execSync } from "child_process";
+
+            const reportPath = "test-results/report.json";
+            if (!fs.existsSync(reportPath)) {
+              console.error("❌ No report.json found");
+              process.exit(1);
+            }
+
+            const report = JSON.parse(fs.readFileSync(reportPath, "utf-8"));
             
-            # 1. Extract the exact failing spec file from error-context.md or runner logs
-            SPEC_PATH=$(grep -oE '[a-zA-Z0-9_\/-]+\.spec\.[tj]s' "$TRACE_DIR/error-context.md" | head -n 1)
+            function findFailures(suite) {
+              for (const spec of suite.specs || []) {
+                for (const test of spec.tests || []) {
+                  for (const result of test.results || []) {
+                    if (result.status === "timedOut" || result.status === "failed") {
+                      const relativeSpecPath = path.relative(process.cwd(), spec.file);
+                      const traceAttachment = result.attachments?.find(a => a.name === "trace");
+                      
+                      if (traceAttachment && traceAttachment.path) {
+                        console.log(`🎯 Found failed spec: ${relativeSpecPath}`);
+                        console.log(`📦 Found trace zip: ${traceAttachment.path}`);
+                        
+                        const cmd = `npx tsx src/cli/fixTrace.ts --trace "${traceAttachment.path}" --spec "${relativeSpecPath}"`;
+                        execSync(cmd, { stdio: "inherit" });
+                      }
+                    }
+                  }
+                }
+              }
+              for (const child of suite.suites || []) {
+                findFailures(child);
+              }
+            }
 
-            # 2. Fallback: search for any spec matching the folder prefix if error-context.md isn't present
-            if [ -z "$SPEC_PATH" ]; then
-              DIR_NAME=$(basename "$TRACE_DIR")
-              SPEC_NAME=$(echo "$DIR_NAME" | cut -d'-' -f1)
-              SPEC_PATH=$(find tests -name "${SPEC_NAME}*.spec.[tj]s" | head -n 1)
-            fi
-
-            if [ -n "$SPEC_PATH" ] && [ -f "$SPEC_PATH" ]; then
-              echo "🎯 Target Spec Found: $SPEC_PATH"
-              echo "📦 Trace File: $TRACE_FILE"
-              
-              npx tsx src/cli/fixTrace.ts --trace "$TRACE_FILE" --spec "$SPEC_PATH"
-            else
-              echo "⚠️ Could not automatically resolve spec file for trace in $TRACE_DIR"
-            fi
-          done
+            for (const suite of report.suites || []) {
+              findFailures(suite);
+            }
+          '
 
       - name: Refactor Spec Source Files with Healed Selectors
         if: failure() && github.event_name == 'push'
