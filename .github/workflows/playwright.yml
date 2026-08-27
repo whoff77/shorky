@@ -29,10 +29,14 @@ jobs:
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps chrome
 
+      # 1. Run Playwright tests with JSON reporter output
       - name: Run Shorky Playwright Tests
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: npx playwright test --project="Google Chrome" --reporter=json,list > test-results/report.json || true
+          PLAYWRIGHT_JSON_OUTPUT_NAME: "test-results/report.json"
+        run: |
+          mkdir -p test-results
+          npx playwright test --project="Google Chrome" --reporter=json,list || true
 
       - name: Run Shorky Fix Analyzer on Failed Traces
         if: failure() && github.event_name == 'push'
