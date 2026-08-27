@@ -40,16 +40,20 @@ jobs:
         run: npx playwright test --project="Google Chrome"
 
       # Step 1: Run Shorky's trace fixer on failure to generate the fix
-      - name: Run Shorky Fix Analyzer on Failed Trace
+      - name: Run Shorky Fix Analyzer on Failed Traces
         if: failure() && github.event_name == 'push'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          TRACE_FILE=$(find test-results -name "trace.zip" | head -n 1)
-          echo "Found trace: $TRACE_FILE"
-          npx tsx src/cli/index.ts fix-trace \
-            --trace "$TRACE_FILE" \
-            --spec tests/broken-login.spec.ts
+          echo "🔍 Locating failed test traces..."
+          
+          # Find all trace.zip files in test-results
+          find test-results -name "trace.zip" | while read -r TRACE_FILE; do
+            echo "Processing trace: $TRACE_FILE"
+            
+            # Run the trace fixer on each trace file found
+            npx tsx src/cli/fixTrace.ts --trace "$TRACE_FILE"
+          done
 
       # Step 2: Apply healed selectors (if your architecture uses a mapping script)
       - name: Refactor Spec Source Files with Healed Selectors
