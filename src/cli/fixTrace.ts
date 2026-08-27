@@ -98,20 +98,20 @@ export async function runOfflineFix({ tracePath, specPath }: RunOfflineFixOption
   console.log(`\n🎉 Successfully patched: ${specPath}`);
 
   // Notify shorky-cloud of the successful fix (non-blocking / best-effort)
-  await notifyShorkyCloud(specPath, {
+  await notifyShorkyCloud(specPath.replace(/^\/+/, ''), {
     fixedCode: cleanCode,
-    explanation: fixResult.explanation
+    explanation: fixResult.explanation,
   });
 }
 
 function sanitizeGeneratedCode(rawCode: string): string {
   return rawCode
-    // Remove markdown code fences (```typescript or ```)
+    // 1. Strip markdown fences (```typescript ... ```)
     .replace(/^```[a-z]*\n?/i, '')
     .replace(/\n?```$/i, '')
-    // Remove LLM header path comments like "// tests/fixed-login.spec.ts"
-    .replace(/^\/\/\s*tests\/[^\n]+\n/i, '')
-    // Normalize line endings to standard Unix LF
+    // 2. Strip LLM header comments like "// tests/fixed-login.spec.ts" or "// tests/broken-login.spec.ts"
+    .replace(/^\/\/\s*[^\n]*\.spec\.[tj]s\n?/i, '')
+    // 3. Normalize CRLF to standard LF
     .replace(/\r\n/g, '\n')
     .trim() + '\n';
 }

@@ -19,8 +19,6 @@ export interface TraceFailureContext {
 /**
  * Recursively locates the newest trace.zip file in test-results if no explicit path is given
  */
-// src/engine/traceParser.ts
-
 export function findLatestTraceZip(baseDir = 'test-results'): string | null {
   if (!fs.existsSync(baseDir)) return null;
 
@@ -47,7 +45,6 @@ export function findLatestTraceZip(baseDir = 'test-results'): string | null {
   zipFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
   return zipFiles[0].filePath;
 }
-
 
 /**
  * Attempts to determine the failing spec file path associated with a given
@@ -117,17 +114,35 @@ export async function parsePlaywrightTrace(traceZipPath: string): Promise<TraceF
       const rawTrace = fs.readFileSync(traceEventsPath, 'utf-8');
       const lines = rawTrace.split('\n').filter(Boolean);
 
+      const actions: any[] = [];
+
       for (const line of lines) {
         try {
           const event = JSON.parse(line);
-          if (event.type === 'action' && event.error) {
-            failureContext.actionMethod = event.method;
-            failureContext.failedSelector = event.params?.selector;
-            failureContext.errorMessage = event.error?.error?.message || event.error?.message;
+          // Capture all action events
+          if (event.type === 'action') {
+            actions.push(event);
           }
         } catch {
           // ignore non-json lines
         }
+      }
+
+      // 1. First priority: Action with an explicit error object
+      // 2. Second priority: Action with errorContext
+      // 3. Fallback: The last recorded action (where the timeout hit)
+      const failedAction =
+        actions.find((a) => a.error || a.errorContext?.error) ||
+        actions[actions.length - 1];
+
+      if (failedAction) {
+        failureContext.actionMethod = failedAction.method || failedAction.apiName;
+        failureContext.failedSelector = failedAction.params?.selector;
+        failureContext.errorMessage =
+          failedAction.error?.error?.message ||
+          failedAction.error?.message ||
+          failedAction.errorContext?.error?.message ||
+          `Timeout executing action: ${failedAction.method || failedAction.apiName || 'unknown'}`;
       }
     }
 
