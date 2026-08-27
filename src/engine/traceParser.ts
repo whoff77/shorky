@@ -49,19 +49,11 @@ export function findLatestTraceZip(baseDir = 'test-results'): string | null {
 /**
  * Attempts to determine the failing spec file path associated with a given
  * trace.zip artifact.
- *
- * Strategy:
- * 1. Look for an `error-context.md` file alongside the trace.zip (Playwright
- *    writes one per failing test into the same test-results subfolder) and
- *    parse its `Location: <path>:<line>:<col>` line.
- * 2. Fall back to inferring the spec file from the trace folder name (e.g.
- *    `broken-login-user-should-be-able-to-log-in-Google-Chrome`) by matching
- *    its slug prefix against the spec files present in `testDir`.
  */
 export function extractSpecPathFromTrace(traceZipPath: string, testDir = 'tests'): string | null {
   const traceDir = path.dirname(traceZipPath);
 
-  // 1. Prefer the explicit "Location:" reference inside error-context.md
+  // 1. Prefer explicit "Location:" reference inside error-context.md
   const errorContextPath = path.join(traceDir, 'error-context.md');
   if (fs.existsSync(errorContextPath)) {
     const contents = fs.readFileSync(errorContextPath, 'utf-8');
@@ -108,51 +100,102 @@ export async function parsePlaywrightTrace(traceZipPath: string): Promise<TraceF
 
     const failureContext: TraceFailureContext = {};
 
-    // 1. Extract error details from trace.trace
+    // 1. Always inspect runner's error-context.md first (populated on timeout)
+    const traceDir = path.dirname(traceZipPath);
+    let runnerErrorMessage: string | undefined;
+    const errorContextPath = path.join(traceDir, 'error-context.md');
+    
+    if (fs.existsSync(errorContextPath)) {
+      runnerErrorMessage = fs.readFileSync(errorContextPath, 'utf-8');
+      
+      const selectorMatch =
+        runnerErrorMessage.match(/waiting for locator\(['"]([^'"]+)['"]\)/i) ||
+        runnerErrorMessage.match(/locator\(['"]([^'"]+)['"]\)/i);
+      
+      if (selectorMatch) {
+        failureContext.failedSelector = selectorMatch[1];
+      }
+
+      const actionMatch = runnerErrorMessage.match(/Error:\s*page\.(\w+):/i);
+      if (actionMatch) {
+        failureContext.actionMethod = `page.${actionMatch[1]}`;
+        failureContext.failedAction = failureContext.actionMethod;
+      }
+
+      failureContext.errorMessage = runnerErrorMessage;
+    }
+
+    // 2. Extract detailed trace actions from trace.trace
     const traceEventsPath = path.join(extractDir, 'trace.trace');
     if (fs.existsSync(traceEventsPath)) {
       const rawTrace = fs.readFileSync(traceEventsPath, 'utf-8');
       const lines = rawTrace.split('\n').filter(Boolean);
 
-      const actions: any[] = [];
+      const actionMap = new Map<string, any>();
+      const actionsSequence: any[] = [];
+      let explicitErrorEvent: any = null;
 
       for (const line of lines) {
         try {
           const event = JSON.parse(line);
-          // Capture all action events
-          if (event.type === 'action') {
-            actions.push(event);
+
+          if (
+            event.callId &&
+            (event.type === 'action' || event.type === 'before' || event.apiName || event.method)
+          ) {
+            const existing = actionMap.get(event.callId) || {};
+            const merged = { ...existing, ...event };
+            actionMap.set(event.callId, merged);
+
+            if (!actionsSequence.some((a) => a.callId === event.callId)) {
+              actionsSequence.push(merged);
+            }
+          }
+
+          if (event.error || event.errorContext) {
+            explicitErrorEvent = event;
           }
         } catch {
           // ignore non-json lines
         }
       }
 
-      // 1. First priority: Action with an explicit error object
-      // 2. Second priority: Action with errorContext
-      // 3. Fallback: The last recorded action (where the timeout hit)
-      const failedAction =
-        actions.find((a) => a.error || a.errorContext?.error) ||
-        actions[actions.length - 1];
+      let targetAction: any = null;
 
-      if (failedAction) {
-        failureContext.actionMethod = failedAction.method || failedAction.apiName;
-        failureContext.failedSelector = failedAction.params?.selector;
-        failureContext.errorMessage =
-          failedAction.error?.error?.message ||
-          failedAction.error?.message ||
-          failedAction.errorContext?.error?.message ||
-          `Timeout executing action: ${failedAction.method || failedAction.apiName || 'unknown'}`;
+      if (explicitErrorEvent) {
+        if (explicitErrorEvent.callId && actionMap.has(explicitErrorEvent.callId)) {
+          targetAction = { ...actionMap.get(explicitErrorEvent.callId), ...explicitErrorEvent };
+        } else {
+          targetAction = explicitErrorEvent;
+        }
+      } else {
+        const unfinishedAction = [...actionsSequence].reverse().find((a) => !a.endTime || a.endTime < 0);
+        targetAction = unfinishedAction || (actionsSequence.length > 0 ? actionsSequence[actionsSequence.length - 1] : null);
+      }
+
+      if (targetAction) {
+        const method = targetAction.method || targetAction.apiName || failureContext.actionMethod || 'unknown';
+        const selector = targetAction.params?.selector || targetAction.selector || failureContext.failedSelector;
+        const msg =
+          targetAction.error?.error?.message ||
+          targetAction.error?.message ||
+          targetAction.errorContext?.error?.message ||
+          failureContext.errorMessage ||
+          `Timeout executing action: ${method}`;
+
+        failureContext.actionMethod = method;
+        failureContext.failedAction = method;
+        failureContext.failedSelector = selector;
+        failureContext.errorMessage = msg;
       }
     }
 
-    // 2. Extract DOM snapshot HTML from resources directory
+    // 3. Extract DOM snapshot HTML from resources directory
     const resourcesDir = path.join(extractDir, 'resources');
     if (fs.existsSync(resourcesDir)) {
       const files = fs.readdirSync(resourcesDir);
       const htmlFile = files.find((f) => f.endsWith('.html') || f.endsWith('.htm'));
       if (htmlFile) {
-        // Cap length at 15k chars to keep prompt concise
         failureContext.domSnapshot = fs
           .readFileSync(path.join(resourcesDir, htmlFile), 'utf-8')
           .slice(0, 15000);
