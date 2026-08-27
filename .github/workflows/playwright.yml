@@ -45,8 +45,10 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          npx tsx src/cli/index.ts fix \
-            --trace test-results/broken-login-user-should-be-able-to-log-in-Google-Chrome-retry2/trace.zip \
+          TRACE_FILE=$(find test-results -name "trace.zip" | head -n 1)
+          echo "Found trace: $TRACE_FILE"
+          npx tsx src/cli/index.ts fix-trace \
+            --trace "$TRACE_FILE" \
             --spec tests/broken-login.spec.ts
 
       # Step 2: Apply healed selectors (if your architecture uses a mapping script)
