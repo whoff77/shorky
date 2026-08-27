@@ -34,39 +34,27 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: npx playwright test --project="Google Chrome"
 
-      - name: Run Shorky Playwright Tests
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: npx playwright test --project="Google Chrome"
-
-      # Step 1: Run Shorky's trace fixer on failure to generate the fix
       - name: Run Shorky Fix Analyzer on Failed Traces
         if: failure() && github.event_name == 'push'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           echo "🔍 Locating failed test traces..."
-          
-          # Find all trace.zip files in test-results
           find test-results -name "trace.zip" | while read -r TRACE_FILE; do
             echo "Processing trace: $TRACE_FILE"
-            
-            # Run the trace fixer on each trace file found
             npx tsx src/cli/fixTrace.ts --trace "$TRACE_FILE"
           done
 
-      # Step 2: Apply healed selectors (if your architecture uses a mapping script)
       - name: Refactor Spec Source Files with Healed Selectors
-        if: always() && github.event_name == 'push'
+        if: failure() && github.event_name == 'push'
         run: npx tsx scripts/apply-healed-selectors.ts
 
-      # Step 3: Create PR with changes using peter-evans/create-pull-request
       - name: Create Pull Request for Healed Tests
-        if: always() && github.event_name == 'push'
+        if: failure() && github.event_name == 'push'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "fix(auto-heal): repair broken selectors in spec"
+          commit-message: "fix(auto-heal): repair broken test locators"
           title: "fix(auto-heal): automated Playwright spec repair"
           branch: "shorky/auto-heal-selectors"
           base: "main"
