@@ -7,7 +7,7 @@ test.describe('Shorky Self-Healing Suite', () => {
     await page.goto('https://the-internet.herokuapp.com/login');
 
     // Fill in standard inputs
-    await page.fill('#wrong-username', 'tomsmith');
+    await page.fill('#username', 'tomsmith');
     await page.fill('#password', 'SuperSecretPassword!');
 
     // Pass an INTENTIONALLY BROKEN selector to our self-healing handler
