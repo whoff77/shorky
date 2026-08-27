@@ -115,3 +115,30 @@ function sanitizeGeneratedCode(rawCode: string): string {
     .replace(/\r\n/g, '\n')
     .trim() + '\n';
 }
+
+// --- Direct CLI Execution Guard ---
+if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('src/cli/fixTrace.ts')) {
+  const args = process.argv.slice(2);
+  let tracePath = '';
+  let specPath = '';
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--trace' && args[i + 1]) {
+      tracePath = args[i + 1];
+      i++;
+    } else if (args[i] === '--spec' && args[i + 1]) {
+      specPath = args[i + 1];
+      i++;
+    }
+  }
+
+  if (!tracePath || !specPath) {
+    console.error('❌ Usage: npx tsx src/cli/fixTrace.ts --trace <path> --spec <path>');
+    process.exit(1);
+  }
+
+  runOfflineFix({ tracePath, specPath }).catch((err) => {
+    console.error('❌ Unhandled error in runOfflineFix:', err);
+    process.exit(1);
+  });
+}

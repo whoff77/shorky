@@ -76,10 +76,12 @@ jobs:
                         console.log(`🎯 Target Spec: ${relativeSpecPath}`);
                         console.log(`📦 Trace Zip: ${traceAttachment.path}`);
                         
+                        
+                        const cmd = `npx tsx src/cli/fixTrace.ts --trace "${traceAttachment.path}" --spec "${relativeSpecPath}"`;
+                        console.log(`🚀 Executing: ${cmd}`);
                         try {
-                          const cmd = `npx tsx src/cli/fixTrace.ts --trace "${traceAttachment.path}" --spec "${relativeSpecPath}"`;
-                          console.log(`🚀 Executing: ${cmd}`);
-                          execSync(cmd, { stdio: "inherit" });
+                          const output = execSync(cmd, { stdio: "inherit" });
+                          console.log("📄 fixTrace Output:\n", output);
                         } catch (err) {
                           console.error(`❌ Error running fixTrace for ${relativeSpecPath}:`, err.message);
                         }
