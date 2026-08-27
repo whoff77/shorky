@@ -5,11 +5,11 @@ test('user should be able to log in', async ({ page }) => {
   await page.goto('https://the-internet.herokuapp.com/login');
   
   // Fill in the username and password fields
-  await page.fill('#username', 'tomsmith');
-  await page.fill('#password', 'SuperSecretPassword!');
+  await page.fill('#userrname', 'tomsmith');
+  await page.fill('#passsword', 'SuperSecretPassword!');
   
   // Click the login button
-  await page.click('button[type="submit"]');
+  await page.click('button[type="sumbit"]');
   
   // Assert that the login was successful by checking the URL or a success message
   await expect(page).toHaveURL('https://the-internet.herokuapp.com/secure');

@@ -12,20 +12,24 @@ dotenv.config();
  * running locally) are swallowed and logged as warnings so this never
  * crashes the local CLI workflow.
  */
-async function notifyShorkyCloud(specFilePath: string, result: FixResult): Promise<void> {
-  const webhookUrl = process.env.SHORKY_CLOUD_URL || 'http://localhost:3000/api/webhook';
+async function notifyShorkyCloud(specPath: string, fixResult: { fixedCode: string; explanation: string }) {
+  const shorkyCloudBaseUrl = process.env.SHORKY_CLOUD_URL || 'http://localhost:3000';
+  const webhookUrl = `${shorkyCloudBaseUrl.replace(/\/api\/v1\/telemetry\/?$/, '')}/api/webhook`;
+
+  // Ensure no leading slash before sending to GitHub API
+  const sanitizedSpecPath = specPath.replace(/^\/+/, '');
 
   const payload = {
-    repoOwner: process.env.GITHUB_REPOSITORY_OWNER || 'whoff77',
-    repoName: process.env.GITHUB_REPOSITORY_NAME || 'shorky',
-    branch: process.env.GITHUB_REF_NAME || 'main',
-    specPath: specFilePath,
-    fixedCode: result.fixedCode,
-    explanation: result.explanation,
+    repoOwner: process.env.GITHUB_REPO_OWNER || 'whoff77',
+    repoName: process.env.GITHUB_REPO_NAME || 'shorky',
+    branch: process.env.GITHUB_BRANCH || 'main',
+    specPath: sanitizedSpecPath, // e.g. "tests/broken-login.spec.ts"
+    fixedCode: fixResult.fixedCode,
+    explanation: fixResult.explanation,
   };
 
   try {
-    const response = await fetch(webhookUrl, {
+    const res = await fetch(webhookUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -34,14 +38,15 @@ async function notifyShorkyCloud(specFilePath: string, result: FixResult): Promi
       body: JSON.stringify(payload),
     });
 
-    if (!response.ok) {
-      console.warn(`⚠️ shorky-cloud webhook responded with status ${response.status}. Skipping.`);
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      console.warn(`⚠️ shorky-cloud webhook responded with status ${res.status}:`, JSON.stringify(errorData));
+    } else {
+      const data = await res.json();
+      console.log(`🎉 Pull Request created: ${data.prUrl || 'PR opened successfully'}`);
     }
-  } catch (error) {
-    console.warn(
-      `⚠️ Unable to reach shorky-cloud webhook (${webhookUrl}). Is shorky-cloud running? Continuing offline.`,
-      error instanceof Error ? error.message : error
-    );
+  } catch (err: any) {
+    console.warn(`⚠️ Failed to trigger shorky-cloud webhook:`, err.message || err);
   }
 }
 
@@ -86,10 +91,27 @@ export async function runOfflineFix({ tracePath, specPath }: RunOfflineFixOption
   console.log(`\n--- Code Diff Preview ---`);
   console.log(fixResult.fixedCode);
 
+  const cleanCode = sanitizeGeneratedCode(fixResult.fixedCode);
+
   // Write updated spec back to disk
-  fs.writeFileSync(absoluteSpecPath, fixResult.fixedCode, 'utf-8');
+  fs.writeFileSync(absoluteSpecPath, cleanCode, 'utf-8');
   console.log(`\n🎉 Successfully patched: ${specPath}`);
 
   // Notify shorky-cloud of the successful fix (non-blocking / best-effort)
-  await notifyShorkyCloud(absoluteSpecPath, fixResult);
+  await notifyShorkyCloud(specPath, {
+    fixedCode: cleanCode,
+    explanation: fixResult.explanation
+  });
+}
+
+function sanitizeGeneratedCode(rawCode: string): string {
+  return rawCode
+    // Remove markdown code fences (```typescript or ```)
+    .replace(/^```[a-z]*\n?/i, '')
+    .replace(/\n?```$/i, '')
+    // Remove LLM header path comments like "// tests/fixed-login.spec.ts"
+    .replace(/^\/\/\s*tests\/[^\n]+\n/i, '')
+    // Normalize line endings to standard Unix LF
+    .replace(/\r\n/g, '\n')
+    .trim() + '\n';
 }

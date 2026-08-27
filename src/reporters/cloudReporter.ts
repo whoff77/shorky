@@ -65,16 +65,39 @@ export default class ShorkyCloudReporter implements Reporter {
     try {
       console.log(`📤 [Shorky Cloud] Transmitting run artifacts to ${cloudUrl}...`);
       
+      const passedCount = this.runData.passed;
+      const failedCount = this.runData.failed;
+      const durationMs = Math.round(result.duration ?? 0);
+
+      // Construct the flattened payload matching shorky-cloud's Zod schema
+      const telemetryPayload = {
+        projectName: process.env.SHORKY_PROJECT_NAME || 'shorky',
+        status: failedCount > 0 ? 'failed' : 'passed',
+        passedCount,
+        failedCount,
+        durationMs,
+        tests: this.testItems.map((item) => ({
+          testName: item.title,
+          status: item.status,
+          traceLogs: [],
+          selfHealingCount: 0,
+        })),
+      };
+
       const response = await fetch(cloudUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ /* payload */ }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-shorky-api-key': process.env.SHORKY_CLOUD_API_KEY || '',
+        },
+        body: JSON.stringify(telemetryPayload),
         // Set a short timeout so offline runs don't hang execution
         signal: AbortSignal.timeout(3000), 
       });
 
       if (!response.ok) {
-        console.warn(`⚠️ [Shorky Cloud] Backend responded with status: ${response.status}`);
+        const errorData = await response.json().catch(() => ({}));
+        console.error('⚠️ [Shorky Cloud] Backend responded with status:', response.status, JSON.stringify(errorData, null, 2));
       } else {
         console.log('✅ [Shorky Cloud] Telemetry successfully transmitted.');
       }
