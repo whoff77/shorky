@@ -29,15 +29,16 @@ jobs:
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps chrome
 
-      # 1. Run Playwright tests with JSON reporter output
+      # 1. Run Playwright tests (Generates report.json and trace files, then fails if tests break)
       - name: Run Shorky Playwright Tests
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PLAYWRIGHT_JSON_OUTPUT_NAME: "test-results/report.json"
         run: |
           mkdir -p test-results
-          npx playwright test --project="Google Chrome" --reporter=json,list || true
+          npx playwright test --project="Google Chrome" --reporter=json,list
 
+      # 2. Run Fix Analyzer ONLY when tests fail on push to main
       - name: Run Shorky Fix Analyzer on Failed Traces
         if: failure() && github.event_name == 'push'
         env:
@@ -87,10 +88,7 @@ jobs:
             }
           '
 
-      - name: Refactor Spec Source Files with Healed Selectors
-        if: failure() && github.event_name == 'push'
-        run: npx tsx scripts/apply-healed-selectors.ts
-
+      # 3. Open Pull Request with the healed spec code
       - name: Create Pull Request for Healed Tests
         if: failure() && github.event_name == 'push'
         uses: peter-evans/create-pull-request@v6
@@ -100,3 +98,4 @@ jobs:
           title: "fix(auto-heal): automated Playwright spec repair"
           branch: "shorky/auto-heal-selectors"
           base: "main"
+          delete-branch: true
