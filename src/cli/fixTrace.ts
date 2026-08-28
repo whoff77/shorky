@@ -98,28 +98,60 @@ export interface FailedSpecInfo {
 }
 
 function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecInfo[] {
-  const failures: FailedSpecInfo[] = [];
+  // Keyed by resolved specPath so that (a) multiple retries of the same test
+  // never produce duplicate entries, and (b) multiple failing tests inside
+  // the same spec file only trigger a single offline-fix pass for that file.
+  const failuresBySpec = new Map<string, FailedSpecInfo>();
 
   function walk(suite: ReportSuite) {
     for (const spec of suite.specs || []) {
       for (const test of spec.tests || []) {
-        for (const result of test.results || []) {
-          if (result.status === 'failed' || result.status === 'timedOut') {
-            let relativeSpecPath = spec.file ? path.relative(process.cwd(), spec.file) : '';
-            if (relativeSpecPath && !relativeSpecPath.startsWith('tests/')) {
-              relativeSpecPath = path.join('tests', relativeSpecPath);
-            }
+        const results = test.results || [];
+        if (results.length === 0) continue;
 
-            const traceAttachment = result.attachments?.find((a) => a.name === 'trace');
-            const errorLog = result.error?.message || result.errors?.[0]?.message;
+        // Playwright records one entry per attempt (initial run + each
+        // retry) in chronological order. Only the *last* entry reflects the
+        // final outcome of the test and points at the trace.zip/attachments
+        // from the final retry directory — earlier entries refer to stale
+        // retry-numbered directories (e.g. "-retry1") that may have already
+        // been cleaned up or don't represent the terminal failure state.
+        const finalResult = results[results.length - 1];
 
-            failures.push({
-              specPath: relativeSpecPath || spec.file || 'unknown-spec',
-              traceZipPath: traceAttachment?.path,
-              errorLog,
-            });
-          }
+        if (finalResult.status !== 'failed' && finalResult.status !== 'timedOut') {
+          continue;
         }
+
+        // spec.file may already be relative (as emitted by the Playwright
+        // JSON reporter for most configs) or absolute (e.g. when the report
+        // is generated from a different working directory). Only apply
+        // path.relative() when we actually have an absolute path so we
+        // don't mangle an already-correct relative path.
+        let relativeSpecPath = '';
+        if (spec.file) {
+          relativeSpecPath = path.isAbsolute(spec.file)
+            ? path.relative(process.cwd(), spec.file)
+            : spec.file;
+        }
+        if (relativeSpecPath && !relativeSpecPath.startsWith('tests/') && !relativeSpecPath.startsWith('tests' + path.sep)) {
+          relativeSpecPath = path.join('tests', relativeSpecPath);
+        }
+        const resolvedSpecPath = relativeSpecPath || spec.file || 'unknown-spec';
+
+        // Deduplicate by specPath: keep the first failure recorded for a
+        // given spec file so we never re-process (and re-fix) the same file
+        // multiple times in a single report.
+        if (failuresBySpec.has(resolvedSpecPath)) {
+          continue;
+        }
+
+        const traceAttachment = finalResult.attachments?.find((a) => a.name === 'trace');
+        const errorLog = finalResult.error?.message || finalResult.errors?.[0]?.message;
+
+        failuresBySpec.set(resolvedSpecPath, {
+          specPath: resolvedSpecPath,
+          traceZipPath: traceAttachment?.path,
+          errorLog,
+        });
       }
     }
 
@@ -132,7 +164,7 @@ function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecI
     walk(suite);
   }
 
-  return failures;
+  return Array.from(failuresBySpec.values());
 }
 
 export interface RunReportFixOptions {

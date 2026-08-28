@@ -13,24 +13,23 @@ const shorkyCloud_1 = require("../config/shorkyCloud");
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
 /**
- * Notifies shorky-cloud that a spec fix has been generated so it can be
- * tracked/surfaced in the dashboard. Failures (e.g. shorky-cloud not
- * running locally) are swallowed and logged as warnings so this never
- * crashes the local CLI workflow.
+ * Sends the final repaired code and trace context to shorky-cloud,
+ * ensuring it only triggers once per successful offline fix.
  */
-async function notifyShorkyCloud(specPath, fixResult) {
-    const webhookUrl = (0, shorkyCloud_1.getShorkyCloudWebhookUrl)(process.env.SHORKY_CLOUD_URL);
-    console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
-    // Ensure no leading slash before sending to GitHub API
+async function notifyShorkyCloud(specPath, fixResult, traceZipPath, errorLog) {
+    const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/');
     const sanitizedSpecPath = specPath.replace(/^\/+/, '');
     const payload = {
-        repoOwner: process.env.GITHUB_REPO_OWNER || 'whoff77',
-        repoName: process.env.GITHUB_REPO_NAME || 'shorky',
-        branch: process.env.GITHUB_BRANCH || 'main',
-        specPath: sanitizedSpecPath, // e.g. "tests/broken-login.spec.ts"
+        repoOwner,
+        repoName,
+        branch: process.env.GITHUB_REF_NAME || process.env.BRANCH || 'main',
+        specPath: sanitizedSpecPath,
+        traceZipPath: traceZipPath || null,
+        errorLog: errorLog || null,
         fixedCode: fixResult.fixedCode,
         explanation: fixResult.explanation,
     };
+    const webhookUrl = (0, shorkyCloud_1.getShorkyCloudWebhookUrl)(process.env.SHORKY_CLOUD_URL);
     try {
         const res = await fetch(webhookUrl, {
             method: 'POST',
@@ -46,39 +45,62 @@ async function notifyShorkyCloud(specPath, fixResult) {
         }
         else {
             const data = await res.json();
-            console.log(`🎉 Pull Request created: ${data.prUrl || 'PR opened successfully'}`);
+            console.log(`🎉 Webhook dispatched successfully: ${data.prUrl || data.message || 'OK'}`);
         }
     }
     catch (err) {
         console.warn(`⚠️ Failed to trigger shorky-cloud webhook:`, err.message || err);
     }
 }
-/**
- * Walks a Playwright JSON report's suite tree and collects failed/timed-out
- * tests, resolving each one's spec file path and associated trace.zip
- * attachment path (if the run was configured with `trace: 'on'`/`'retain-on-failure'`).
- */
 function collectFailedSpecsFromReport(report) {
-    const failures = [];
+    // Keyed by resolved specPath so that (a) multiple retries of the same test
+    // never produce duplicate entries, and (b) multiple failing tests inside
+    // the same spec file only trigger a single offline-fix pass for that file.
+    const failuresBySpec = new Map();
     function walk(suite) {
         for (const spec of suite.specs || []) {
             for (const test of spec.tests || []) {
-                for (const result of test.results || []) {
-                    if (result.status === 'failed' || result.status === 'timedOut') {
-                        // Ensure relative path includes tests/ directory, matching legacy CI behavior
-                        let relativeSpecPath = spec.file ? path_1.default.relative(process.cwd(), spec.file) : '';
-                        if (relativeSpecPath && !relativeSpecPath.startsWith('tests/')) {
-                            relativeSpecPath = path_1.default.join('tests', relativeSpecPath);
-                        }
-                        const traceAttachment = result.attachments?.find((a) => a.name === 'trace');
-                        const errorLog = result.error?.message || result.errors?.[0]?.message;
-                        failures.push({
-                            specPath: relativeSpecPath || spec.file || 'unknown-spec',
-                            traceZipPath: traceAttachment?.path,
-                            errorLog,
-                        });
-                    }
+                const results = test.results || [];
+                if (results.length === 0)
+                    continue;
+                // Playwright records one entry per attempt (initial run + each
+                // retry) in chronological order. Only the *last* entry reflects the
+                // final outcome of the test and points at the trace.zip/attachments
+                // from the final retry directory — earlier entries refer to stale
+                // retry-numbered directories (e.g. "-retry1") that may have already
+                // been cleaned up or don't represent the terminal failure state.
+                const finalResult = results[results.length - 1];
+                if (finalResult.status !== 'failed' && finalResult.status !== 'timedOut') {
+                    continue;
                 }
+                // spec.file may already be relative (as emitted by the Playwright
+                // JSON reporter for most configs) or absolute (e.g. when the report
+                // is generated from a different working directory). Only apply
+                // path.relative() when we actually have an absolute path so we
+                // don't mangle an already-correct relative path.
+                let relativeSpecPath = '';
+                if (spec.file) {
+                    relativeSpecPath = path_1.default.isAbsolute(spec.file)
+                        ? path_1.default.relative(process.cwd(), spec.file)
+                        : spec.file;
+                }
+                if (relativeSpecPath && !relativeSpecPath.startsWith('tests/') && !relativeSpecPath.startsWith('tests' + path_1.default.sep)) {
+                    relativeSpecPath = path_1.default.join('tests', relativeSpecPath);
+                }
+                const resolvedSpecPath = relativeSpecPath || spec.file || 'unknown-spec';
+                // Deduplicate by specPath: keep the first failure recorded for a
+                // given spec file so we never re-process (and re-fix) the same file
+                // multiple times in a single report.
+                if (failuresBySpec.has(resolvedSpecPath)) {
+                    continue;
+                }
+                const traceAttachment = finalResult.attachments?.find((a) => a.name === 'trace');
+                const errorLog = finalResult.error?.message || finalResult.errors?.[0]?.message;
+                failuresBySpec.set(resolvedSpecPath, {
+                    specPath: resolvedSpecPath,
+                    traceZipPath: traceAttachment?.path,
+                    errorLog,
+                });
             }
         }
         for (const child of suite.suites || []) {
@@ -88,54 +110,8 @@ function collectFailedSpecsFromReport(report) {
     for (const suite of report.suites || []) {
         walk(suite);
     }
-    return failures;
+    return Array.from(failuresBySpec.values());
 }
-/**
- * Packages a failed spec's context (spec file, trace zip, error log) and
- * dispatches it to shorky-cloud's webhook endpoint for telemetry purposes.
- * Silently skips dispatch when cloud credentials are not configured, and
- * swallows network failures so a missing/unreachable cloud never breaks CI.
- */
-async function dispatchFailureTelemetry(failure) {
-    const shorkyCloudApiKey = (0, shorkyCloud_1.getShorkyCloudApiKey)();
-    if (!process.env.SHORKY_CLOUD_URL || !shorkyCloudApiKey) {
-        console.log(`ℹ️ SHORKY_CLOUD_URL/SHORKY_CLOUD_API_KEY not configured. Skipping telemetry dispatch for ${failure.specPath}.`);
-        return;
-    }
-    const webhookUrl = (0, shorkyCloud_1.getShorkyCloudWebhookUrl)();
-    console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
-    const payload = {
-        specPath: failure.specPath.replace(/^\/+/, ''),
-        traceZipPath: failure.traceZipPath || null,
-        errorLog: failure.errorLog || null,
-    };
-    try {
-        const res = await fetch(webhookUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'x-shorky-api-key': shorkyCloudApiKey,
-            },
-            body: JSON.stringify(payload),
-        });
-        if (res.ok) {
-            console.log(`✅ Telemetry dispatched for ${failure.specPath} (HTTP ${res.status})`);
-        }
-        else {
-            const errorData = await res.json().catch(() => ({}));
-            console.warn(`⚠️ shorky-cloud webhook responded with status ${res.status} for ${failure.specPath}:`, JSON.stringify(errorData));
-        }
-    }
-    catch (err) {
-        console.warn(`⚠️ Failed to dispatch telemetry for ${failure.specPath}:`, err.message || err);
-    }
-}
-/**
- * Reads a Playwright JSON report (e.g. `test-results/report.json`), extracts
- * every failed/timed-out test's spec + trace.zip, dispatches failure
- * telemetry to shorky-cloud, and attempts an offline LLM-powered fix for any
- * failure where both the trace.zip and spec file are present on disk.
- */
 async function runReportFix({ reportPath }) {
     const absoluteReportPath = path_1.default.resolve(reportPath);
     if (!fs_1.default.existsSync(absoluteReportPath)) {
@@ -156,7 +132,8 @@ async function runReportFix({ reportPath }) {
         if (failure.errorLog) {
             console.log(`💥 Error: ${failure.errorLog}`);
         }
-        await dispatchFailureTelemetry(failure);
+        // Completely removed duplicate pre-telemetry ping (`dispatchFailureTelemetry`) 
+        // to stop the triplet job expansion. Only run the offline fix cycle.
         if (failure.traceZipPath && fs_1.default.existsSync(failure.traceZipPath) && fs_1.default.existsSync(failure.specPath)) {
             try {
                 await runOfflineFix({ tracePath: failure.traceZipPath, specPath: failure.specPath });
@@ -199,28 +176,25 @@ async function runOfflineFix({ tracePath, specPath }) {
     console.log(`📝 Explanation: ${fixResult.explanation}`);
     console.log(`\n--- Code Diff Preview ---`);
     console.log(fixResult.fixedCode);
-    const cleanCode = sanitizeGeneratedCode(fixResult.fixedCode);
-    // Write updated spec back to disk
-    fs_1.default.writeFileSync(absoluteSpecPath, cleanCode, 'utf-8');
+    const cleaned = sanitizeGeneratedCode(fixResult.fixedCode);
+    // Guardrail: Prevent wiping out test code with empty or truncated outputs
+    if (!cleaned || cleaned.length < 30 || !cleaned.includes('test(')) {
+        console.error(`❌ Error: LLM generated invalid or empty spec code for ${specPath}. Aborting file write to protect test file.`);
+        return;
+    }
+    fs_1.default.writeFileSync(absoluteSpecPath, cleaned, 'utf-8');
     console.log(`\n🎉 Successfully patched: ${specPath}`);
-    // Notify shorky-cloud of the successful fix (non-blocking / best-effort)
-    await notifyShorkyCloud(specPath.replace(/^\/+/, ''), {
-        fixedCode: cleanCode,
-        explanation: fixResult.explanation,
-    });
+    // Single unified webhook dispatch containing the genuine fix payload
+    await notifyShorkyCloud(specPath, { fixedCode: cleaned, explanation: fixResult.explanation }, absoluteTracePath, failureContext.errorMessage);
 }
 function sanitizeGeneratedCode(rawCode) {
     return rawCode
-        // 1. Strip markdown fences (```typescript ... ```)
         .replace(/^```[a-z]*\n?/i, '')
         .replace(/\n?```$/i, '')
-        // 2. Strip LLM header comments like "// tests/fixed-login.spec.ts" or "// tests/broken-login.spec.ts"
         .replace(/^\/\/\s*[^\n]*\.spec\.[tj]s\n?/i, '')
-        // 3. Normalize CRLF to standard LF
         .replace(/\r\n/g, '\n')
         .trim() + '\n';
 }
-// --- Direct CLI Execution Guard ---
 if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('src/cli/fixTrace.ts')) {
     const args = process.argv.slice(2);
     let tracePath = '';
@@ -241,14 +215,12 @@ if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('src/cli/fix
         }
     }
     if (reportPath) {
-        // New flow: read failed tests directly from a Playwright JSON report
         runReportFix({ reportPath }).catch((err) => {
             console.error('❌ Unhandled error in runReportFix:', err);
             process.exit(1);
         });
     }
     else if (tracePath && specPath) {
-        // Legacy flow: manual invocation with an explicit trace + spec pair
         runOfflineFix({ tracePath, specPath }).catch((err) => {
             console.error('❌ Unhandled error in runOfflineFix:', err);
             process.exit(1);

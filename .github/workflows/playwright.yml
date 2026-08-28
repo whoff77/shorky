@@ -33,6 +33,7 @@ jobs:
       - name: Run Shorky Playwright Tests
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: "test-results/report.json"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           mkdir -p test-results
           npx playwright test --project="Google Chrome" --reporter=json,list
@@ -44,5 +45,6 @@ jobs:
         with:
           shorky-cloud-url: ${{ vars.SHORKY_CLOUD_URL }}
           shorky-cloud-api-key: ${{ secrets.SHORKY_CLOUD_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           report-path: "test-results/report.json"

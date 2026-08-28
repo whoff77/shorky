@@ -13,6 +13,9 @@ inputs:
   shorky-cloud-api-key:
     description: 'API key for authenticating with shorky-cloud'
     required: false
+  openai-api-key:
+    description: 'OpenAI API key used by Shorky to generate LLM-powered spec fixes locally'
+    required: false
   github-token:
     description: 'GitHub token for PR generation fallback'
     required: true
@@ -30,6 +33,7 @@ runs:
       env:
         SHORKY_CLOUD_URL: ${{ inputs.shorky-cloud-url }}
         SHORKY_CLOUD_API_KEY: ${{ inputs.shorky-cloud-api-key }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         REPORT_PATH: ${{ inputs.report-path }}
       run: |
