@@ -8,10 +8,16 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 /**
- * Notifies shorky-cloud that a spec fix has been generated so it can be
- * tracked/surfaced in the dashboard.
+ * Notifies shorky-cloud that a spec fix has been generated or sends initial 
+ * telemetry. Uses empty strings instead of null for code/explanation to 
+ * satisfy Zod string validation rules on the backend endpoint.
  */
-async function notifyShorkyCloud(specPath: string, fixResult: { fixedCode: string; explanation: string }) {
+async function notifyShorkyCloud(
+  specPath: string, 
+  fixResult: { fixedCode: string; explanation: string }, 
+  traceZipPath?: string | null,
+  errorLog?: string | null
+) {
   const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/');
   const sanitizedSpecPath = specPath.replace(/^\/+/, '');
   const payload = {
@@ -19,8 +25,10 @@ async function notifyShorkyCloud(specPath: string, fixResult: { fixedCode: strin
     repoName,
     branch: process.env.GITHUB_REF_NAME || process.env.BRANCH || 'main',
     specPath: sanitizedSpecPath,
-    fixedCode: fixResult.fixedCode,
-    explanation: fixResult.explanation,
+    traceZipPath: traceZipPath || null,
+    errorLog: errorLog || null,
+    fixedCode: fixResult.fixedCode || '',
+    explanation: fixResult.explanation || '',
   };
 
   const webhookUrl = getShorkyCloudWebhookUrl(process.env.SHORKY_CLOUD_URL);
@@ -39,7 +47,7 @@ async function notifyShorkyCloud(specPath: string, fixResult: { fixedCode: strin
       console.warn(`⚠️ shorky-cloud webhook responded with status ${res.status}:`, JSON.stringify(errorData));
     } else {
       const data = await res.json();
-      console.log(`🎉 Pull Request created: ${data.prUrl || 'PR opened successfully'}`);
+      console.log(`🎉 Webhook dispatched successfully: ${data.prUrl || data.message || 'OK'}`);
     }
   } catch (err: any) {
     console.warn(`⚠️ Failed to trigger shorky-cloud webhook:`, err.message || err);
@@ -139,37 +147,12 @@ async function dispatchFailureTelemetry(failure: FailedSpecInfo): Promise<void> 
   const webhookUrl = getShorkyCloudWebhookUrl();
   console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
 
-  const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/');
-  const payload = {
-    repoOwner,
-    repoName,
-    branch: process.env.GITHUB_REF_NAME || process.env.BRANCH || 'main',
-    specPath: failure.specPath.replace(/^\/+/, ''),
-    traceZipPath: failure.traceZipPath || null,
-    errorLog: failure.errorLog || null,
-    fixedCode: null,
-    explanation: null,
-  };
-
-  try {
-    const res = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-shorky-api-key': shorkyCloudApiKey,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (res.ok) {
-      console.log(`✅ Telemetry dispatched for ${failure.specPath} (HTTP ${res.status})`);
-    } else {
-      const errorData = await res.json().catch(() => ({}));
-      console.warn(`⚠️ shorky-cloud webhook responded with status ${res.status} for ${failure.specPath}:`, JSON.stringify(errorData));
-    }
-  } catch (err: any) {
-    console.warn(`⚠️ Failed to dispatch telemetry for ${failure.specPath}:`, err.message || err);
-  }
+  await notifyShorkyCloud(
+    failure.specPath,
+    { fixedCode: '', explanation: '' },
+    failure.traceZipPath,
+    failure.errorLog
+  );
 }
 
 export interface RunReportFixOptions {
@@ -262,10 +245,12 @@ export async function runOfflineFix({ tracePath, specPath }: RunOfflineFixOption
   fs.writeFileSync(absoluteSpecPath, cleanCode, 'utf-8');
   console.log(`\n🎉 Successfully patched: ${specPath}`);
 
-  await notifyShorkyCloud(specPath.replace(/^\/+/, ''), {
-    fixedCode: cleanCode,
-    explanation: fixResult.explanation,
-  });
+  await notifyShorkyCloud(
+    specPath,
+    { fixedCode: cleanCode, explanation: fixResult.explanation },
+    absoluteTracePath,
+    failureContext.errorMessage
+  );
 }
 
 function sanitizeGeneratedCode(rawCode: string): string {
