@@ -38,76 +38,11 @@ jobs:
           mkdir -p test-results
           npx playwright test --project="Google Chrome" --reporter=json,list
 
-      # 2. Run Fix Analyzer ONLY when tests fail on push to main
-      - name: Run Shorky Fix Analyzer on Failed Traces
+      # 2. Run Shorky Auto-Heal ONLY when tests fail on push to main
+      - name: Run Shorky Auto-Heal
         if: failure() && github.event_name == 'push'
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          echo "🔍 Resolving failed specs and traces from Playwright JSON report..."
-
-          npx tsx -e '
-            import fs from "fs";
-            import path from "path";
-            import { execSync } from "child_process";
-
-            const reportPath = "test-results/report.json";
-            if (!fs.existsSync(reportPath)) {
-              console.error("❌ No report.json found");
-              process.exit(1);
-            }
-
-            const report = JSON.parse(fs.readFileSync(reportPath, "utf-8"));
-            
-            function findFailures(suite) {
-              for (const spec of suite.specs || []) {
-                for (const test of spec.tests || []) {
-                  for (const result of test.results || []) {
-                    if (result.status === "timedOut" || result.status === "failed") {
-                      // Ensure relative path includes tests/ directory
-                      let relativeSpecPath = path.relative(process.cwd(), spec.file);
-                      if (!relativeSpecPath.startsWith("tests/")) {
-                        relativeSpecPath = path.join("tests", relativeSpecPath);
-                      }
-
-                      const traceAttachment = result.attachments?.find(a => a.name === "trace");
-                      
-                      if (traceAttachment && traceAttachment.path) {
-                        console.log(`🎯 Target Spec: ${relativeSpecPath}`);
-                        console.log(`📦 Trace Zip: ${traceAttachment.path}`);
-                        
-                        
-                        const cmd = `npx tsx src/cli/fixTrace.ts --trace "${traceAttachment.path}" --spec "${relativeSpecPath}"`;
-                        console.log(`🚀 Executing: ${cmd}`);
-                        try {
-                          const output = execSync(cmd, { stdio: "inherit" });
-                          console.log("📄 fixTrace Output:\n", output);
-                        } catch (err) {
-                          console.error(`❌ Error running fixTrace for ${relativeSpecPath}:`, err.message);
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-              for (const child of suite.suites || []) {
-                findFailures(child);
-              }
-            }
-
-            for (const suite of report.suites || []) {
-              findFailures(suite);
-            }
-          '
-
-      # 3. Open Pull Request with the healed spec code
-      - name: Create Pull Request for Healed Tests
-        if: failure() && github.event_name == 'push'
-        uses: peter-evans/create-pull-request@v6
+        uses: ./
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "fix(auto-heal): repair broken test locators"
-          title: "fix(auto-heal): automated Playwright spec repair"
-          branch: "shorky/auto-heal-selectors"
-          base: "main"
-          delete-branch: true
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          report-path: "test-results/report.json"

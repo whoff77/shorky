@@ -1,0 +1,89 @@
+name: 'Shorky Auto-Heal'
+description: 'Analyzes failed Playwright traces with Shorky and opens a PR with self-healed selectors.'
+author: 'Shorky'
+
+inputs:
+  openai-api-key:
+    description: 'OpenAI API key used by Shorky to analyze failed traces and generate selector fixes.'
+    required: true
+  github-token:
+    description: 'GitHub token used to push the auto-heal branch and open a pull request.'
+    required: true
+  report-path:
+    description: 'Path to the Playwright JSON report used to locate failed specs and trace files.'
+    required: false
+    default: 'test-results/report.json'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run Shorky Fix Analyzer on Failed Traces
+      shell: bash
+      env:
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        SHORKY_REPORT_PATH: ${{ inputs.report-path }}
+      run: |
+        echo "🔍 Resolving failed specs and traces from Playwright JSON report..."
+
+        npx tsx -e '
+          import fs from "fs";
+          import path from "path";
+          import { execSync } from "child_process";
+
+          const reportPath = process.env.SHORKY_REPORT_PATH || "test-results/report.json";
+          if (!fs.existsSync(reportPath)) {
+            console.error("❌ No report.json found at " + reportPath);
+            process.exit(1);
+          }
+
+          const report = JSON.parse(fs.readFileSync(reportPath, "utf-8"));
+
+          function findFailures(suite) {
+            for (const spec of suite.specs || []) {
+              for (const test of spec.tests || []) {
+                for (const result of test.results || []) {
+                  if (result.status === "timedOut" || result.status === "failed") {
+                    // Ensure relative path includes tests/ directory
+                    let relativeSpecPath = path.relative(process.cwd(), spec.file);
+                    if (!relativeSpecPath.startsWith("tests/")) {
+                      relativeSpecPath = path.join("tests", relativeSpecPath);
+                    }
+
+                    const traceAttachment = result.attachments?.find(a => a.name === "trace");
+
+                    if (traceAttachment && traceAttachment.path) {
+                      console.log(`🎯 Target Spec: ${relativeSpecPath}`);
+                      console.log(`📦 Trace Zip: ${traceAttachment.path}`);
+
+                      const cmd = `npx tsx src/cli/fixTrace.ts --trace "${traceAttachment.path}" --spec "${relativeSpecPath}"`;
+                      console.log(`🚀 Executing: ${cmd}`);
+                      try {
+                        const output = execSync(cmd, { stdio: "inherit" });
+                        console.log("📄 fixTrace Output:\n", output);
+                      } catch (err) {
+                        console.error(`❌ Error running fixTrace for ${relativeSpecPath}:`, err.message);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            for (const child of suite.suites || []) {
+              findFailures(child);
+            }
+          }
+
+          for (const suite of report.suites || []) {
+            findFailures(suite);
+          }
+        '
+
+    - name: Create Pull Request for Healed Tests
+      uses: peter-evans/create-pull-request@v6
+      with:
+        token: ${{ inputs.github-token }}
+        commit-message: "fix(auto-heal): repair broken test locators"
+        title: "fix(auto-heal): automated Playwright spec repair"
+        branch: "shorky/auto-heal-selectors"
+        base: "main"
+        delete-branch: true
