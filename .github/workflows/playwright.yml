@@ -42,7 +42,7 @@ jobs:
         if: failure() && github.event_name == 'push'
         uses: ./
         with:
-          shorky-cloud-url: ${{ secrets.SHORKY_CLOUD_URL }}
+          shorky-cloud-url: ${{ vars.SHORKY_CLOUD_URL }}
           shorky-cloud-api-key: ${{ secrets.SHORKY_CLOUD_API_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           report-path: "test-results/report.json"
