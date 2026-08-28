@@ -19,7 +19,7 @@ dotenv_1.default.config();
  * crashes the local CLI workflow.
  */
 async function notifyShorkyCloud(specPath, fixResult) {
-    const webhookUrl = (0, shorkyCloud_1.getShorkyCloudWebhookUrl)('http://localhost:3000');
+    const webhookUrl = (0, shorkyCloud_1.getShorkyCloudWebhookUrl)(process.env.SHORKY_CLOUD_URL);
     console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
     // Ensure no leading slash before sending to GitHub API
     const sanitizedSpecPath = specPath.replace(/^\/+/, '');
