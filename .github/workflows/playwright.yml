@@ -29,20 +29,20 @@ jobs:
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps chrome
 
-      # 1. Run Playwright tests (Generates report.json and trace files, then fails if tests break)
+      # 1. Run Playwright tests
       - name: Run Shorky Playwright Tests
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           PLAYWRIGHT_JSON_OUTPUT_NAME: "test-results/report.json"
         run: |
           mkdir -p test-results
           npx playwright test --project="Google Chrome" --reporter=json,list
 
-      # 2. Run Shorky Auto-Heal ONLY when tests fail on push to main
-      - name: Run Shorky Auto-Heal
+      # 2. Dispatch failure telemetry to shorky-cloud
+      - name: Run Shorky Cloud Telemetry
         if: failure() && github.event_name == 'push'
         uses: ./
         with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          shorky-cloud-url: ${{ secrets.SHORKY_CLOUD_URL }}
+          shorky-cloud-api-key: ${{ secrets.SHORKY_CLOUD_API_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           report-path: "test-results/report.json"
