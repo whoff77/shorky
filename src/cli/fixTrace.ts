@@ -8,9 +8,8 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 /**
- * Notifies shorky-cloud that a spec fix has been generated or sends initial 
- * telemetry. Uses placeholder strings for code/explanation to satisfy 
- * backend Zod validation rules requiring >=1 character.
+ * Sends the final repaired code and trace context to shorky-cloud, 
+ * ensuring it only triggers once per successful offline fix.
  */
 async function notifyShorkyCloud(
   specPath: string, 
@@ -27,8 +26,8 @@ async function notifyShorkyCloud(
     specPath: sanitizedSpecPath,
     traceZipPath: traceZipPath || null,
     errorLog: errorLog || null,
-    fixedCode: fixResult.fixedCode || '',
-    explanation: fixResult.explanation || '',
+    fixedCode: fixResult.fixedCode,
+    explanation: fixResult.explanation,
   };
 
   const webhookUrl = getShorkyCloudWebhookUrl(process.env.SHORKY_CLOUD_URL);
@@ -136,25 +135,6 @@ function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecI
   return failures;
 }
 
-async function dispatchFailureTelemetry(failure: FailedSpecInfo): Promise<void> {
-  const shorkyCloudApiKey = getShorkyCloudApiKey();
-
-  if (!process.env.SHORKY_CLOUD_URL || !shorkyCloudApiKey) {
-    console.log(`ℹ️ SHORKY_CLOUD_URL/SHORKY_CLOUD_API_KEY not configured. Skipping telemetry dispatch for ${failure.specPath}.`);
-    return;
-  }
-
-  const webhookUrl = getShorkyCloudWebhookUrl();
-  console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
-
-  await notifyShorkyCloud(
-    failure.specPath,
-    { fixedCode: '// telemetry event', explanation: 'Initial test failure telemetry report' },
-    failure.traceZipPath,
-    failure.errorLog
-  );
-}
-
 export interface RunReportFixOptions {
   reportPath: string;
 }
@@ -185,8 +165,8 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
       console.log(`💥 Error: ${failure.errorLog}`);
     }
 
-    // Restore telemetry ping so shorky-cloud recognizes the failure event
-    await dispatchFailureTelemetry(failure);
+    // Completely removed duplicate pre-telemetry ping (`dispatchFailureTelemetry`) 
+    // to stop the triplet job expansion. Only run the offline fix cycle.
 
     if (failure.traceZipPath && fs.existsSync(failure.traceZipPath) && fs.existsSync(failure.specPath)) {
       try {
@@ -241,16 +221,18 @@ export async function runOfflineFix({ tracePath, specPath }: RunOfflineFixOption
   console.log(`\n--- Code Diff Preview ---`);
   console.log(fixResult.fixedCode);
 
-  // Safeguard: If the LLM returned empty code or stripped out the entire file content, do not overwrite it.
   const cleaned = sanitizeGeneratedCode(fixResult.fixedCode);
-  if (!cleaned || cleaned.length < 15 || !cleaned.includes('test(')) {
-    console.error(`❌ Error: LLM generated invalid or empty spec code for ${specPath}. Aborting file write to protect test suite.`);
+  
+  // Guardrail: Prevent wiping out test code with empty or truncated outputs
+  if (!cleaned || cleaned.length < 30 || !cleaned.includes('test(')) {
+    console.error(`❌ Error: LLM generated invalid or empty spec code for ${specPath}. Aborting file write to protect test file.`);
     return;
   }
 
   fs.writeFileSync(absoluteSpecPath, cleaned, 'utf-8');
   console.log(`\n🎉 Successfully patched: ${specPath}`);
 
+  // Single unified webhook dispatch containing the genuine fix payload
   await notifyShorkyCloud(
     specPath,
     { fixedCode: cleaned, explanation: fixResult.explanation },
