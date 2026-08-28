@@ -6,9 +6,17 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.runAgentGoal = runAgentGoal;
 const openai_1 = __importDefault(require("openai"));
 const tools_1 = require("./tools");
-const openai = new openai_1.default({
-    apiKey: process.env.OPENAI_API_KEY,
-});
+let cachedClient = null;
+function getOpenAIClient() {
+    if (cachedClient) {
+        return cachedClient;
+    }
+    if (!process.env.OPENAI_API_KEY) {
+        throw new Error('OPENAI_API_KEY is missing. Provide OPENAI_API_KEY for local agent execution.');
+    }
+    cachedClient = new openai_1.default({ apiKey: process.env.OPENAI_API_KEY });
+    return cachedClient;
+}
 /**
  * ReAct Agent Runner
  * Executes a high-level testing goal autonomously via a Reason-Act-Observe loop.
@@ -54,7 +62,7 @@ Workflow Rules:
         stepCount++;
         console.log(`\n🔄 [ReAct Cycle ${stepCount}/${maxSteps}] Reason & Plan...`);
         // 1. Ask model for next action or completion
-        const response = await openai.chat.completions.create({
+        const response = await getOpenAIClient().chat.completions.create({
             model: 'gpt-4o-mini',
             messages,
             tools: tools_1.SHORKY_AGENT_TOOLS,

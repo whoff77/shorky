@@ -2,9 +2,20 @@ import { Page } from '@playwright/test';
 import OpenAI from 'openai';
 import { SHORKY_AGENT_TOOLS, executeAgentTool, AgentTraceEntry } from './tools';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+let cachedClient: OpenAI | null = null;
+
+function getOpenAIClient(): OpenAI {
+  if (cachedClient) {
+    return cachedClient;
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is missing. Provide OPENAI_API_KEY for local agent execution.');
+  }
+
+  cachedClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return cachedClient;
+}
 
 export interface AgentRunOptions {
   goal: string;
@@ -74,7 +85,7 @@ Workflow Rules:
     console.log(`\n🔄 [ReAct Cycle ${stepCount}/${maxSteps}] Reason & Plan...`);
 
     // 1. Ask model for next action or completion
-    const response = await openai.chat.completions.create({
+    const response = await getOpenAIClient().chat.completions.create({
       model: 'gpt-4o-mini',
       messages,
       tools: SHORKY_AGENT_TOOLS,
