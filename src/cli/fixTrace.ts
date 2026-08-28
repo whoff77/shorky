@@ -185,7 +185,8 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
       console.log(`💥 Error: ${failure.errorLog}`);
     }
 
-    await dispatchFailureTelemetry(failure);
+    // REMOVED duplicate dispatchFailureTelemetry(failure) call here 
+    // to prevent firing multiple webhook requests per test.
 
     if (failure.traceZipPath && fs.existsSync(failure.traceZipPath) && fs.existsSync(failure.specPath)) {
       try {
