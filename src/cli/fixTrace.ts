@@ -14,21 +14,18 @@ dotenv.config();
  * crashes the local CLI workflow.
  */
 async function notifyShorkyCloud(specPath: string, fixResult: { fixedCode: string; explanation: string }) {
-  const webhookUrl = getShorkyCloudWebhookUrl(process.env.SHORKY_CLOUD_URL);
-  console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
-
-  // Ensure no leading slash before sending to GitHub API
+  const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/')
   const sanitizedSpecPath = specPath.replace(/^\/+/, '');
-
   const payload = {
-    repoOwner: process.env.GITHUB_REPO_OWNER || 'whoff77',
-    repoName: process.env.GITHUB_REPO_NAME || 'shorky',
-    branch: process.env.GITHUB_BRANCH || 'main',
+    repoOwner: repoOwner,
+    repoName: repoName,
+    branch: process.env.GITHUB_REF_NAME || process.env.BRANCH || 'main',
     specPath: sanitizedSpecPath, // e.g. "tests/broken-login.spec.ts"
     fixedCode: fixResult.fixedCode,
     explanation: fixResult.explanation,
   };
 
+  const webhookUrl = getShorkyCloudWebhookUrl(process.env.SHORKY_CLOUD_URL);
   try {
     const res = await fetch(webhookUrl, {
       method: 'POST',
