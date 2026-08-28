@@ -9,18 +9,16 @@ dotenv.config();
 
 /**
  * Notifies shorky-cloud that a spec fix has been generated so it can be
- * tracked/surfaced in the dashboard. Failures (e.g. shorky-cloud not
- * running locally) are swallowed and logged as warnings so this never
- * crashes the local CLI workflow.
+ * tracked/surfaced in the dashboard.
  */
 async function notifyShorkyCloud(specPath: string, fixResult: { fixedCode: string; explanation: string }) {
-  const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/')
+  const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/');
   const sanitizedSpecPath = specPath.replace(/^\/+/, '');
   const payload = {
-    repoOwner: repoOwner,
-    repoName: repoName,
+    repoOwner,
+    repoName,
     branch: process.env.GITHUB_REF_NAME || process.env.BRANCH || 'main',
-    specPath: sanitizedSpecPath, // e.g. "tests/broken-login.spec.ts"
+    specPath: sanitizedSpecPath,
     fixedCode: fixResult.fixedCode,
     explanation: fixResult.explanation,
   };
@@ -92,11 +90,6 @@ export interface FailedSpecInfo {
   errorLog?: string;
 }
 
-/**
- * Walks a Playwright JSON report's suite tree and collects failed/timed-out
- * tests, resolving each one's spec file path and associated trace.zip
- * attachment path (if the run was configured with `trace: 'on'`/`'retain-on-failure'`).
- */
 function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecInfo[] {
   const failures: FailedSpecInfo[] = [];
 
@@ -105,7 +98,6 @@ function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecI
       for (const test of spec.tests || []) {
         for (const result of test.results || []) {
           if (result.status === 'failed' || result.status === 'timedOut') {
-            // Ensure relative path includes tests/ directory, matching legacy CI behavior
             let relativeSpecPath = spec.file ? path.relative(process.cwd(), spec.file) : '';
             if (relativeSpecPath && !relativeSpecPath.startsWith('tests/')) {
               relativeSpecPath = path.join('tests', relativeSpecPath);
@@ -136,12 +128,6 @@ function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecI
   return failures;
 }
 
-/**
- * Packages a failed spec's context (spec file, trace zip, error log) and
- * dispatches it to shorky-cloud's webhook endpoint for telemetry purposes.
- * Silently skips dispatch when cloud credentials are not configured, and
- * swallows network failures so a missing/unreachable cloud never breaks CI.
- */
 async function dispatchFailureTelemetry(failure: FailedSpecInfo): Promise<void> {
   const shorkyCloudApiKey = getShorkyCloudApiKey();
 
@@ -153,10 +139,16 @@ async function dispatchFailureTelemetry(failure: FailedSpecInfo): Promise<void> 
   const webhookUrl = getShorkyCloudWebhookUrl();
   console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
 
+  const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/');
   const payload = {
+    repoOwner,
+    repoName,
+    branch: process.env.GITHUB_REF_NAME || process.env.BRANCH || 'main',
     specPath: failure.specPath.replace(/^\/+/, ''),
     traceZipPath: failure.traceZipPath || null,
     errorLog: failure.errorLog || null,
+    fixedCode: null,
+    explanation: null,
   };
 
   try {
@@ -184,12 +176,6 @@ export interface RunReportFixOptions {
   reportPath: string;
 }
 
-/**
- * Reads a Playwright JSON report (e.g. `test-results/report.json`), extracts
- * every failed/timed-out test's spec + trace.zip, dispatches failure
- * telemetry to shorky-cloud, and attempts an offline LLM-powered fix for any
- * failure where both the trace.zip and spec file are present on disk.
- */
 export async function runReportFix({ reportPath }: RunReportFixOptions) {
   const absoluteReportPath = path.resolve(reportPath);
 
@@ -273,11 +259,9 @@ export async function runOfflineFix({ tracePath, specPath }: RunOfflineFixOption
 
   const cleanCode = sanitizeGeneratedCode(fixResult.fixedCode);
 
-  // Write updated spec back to disk
   fs.writeFileSync(absoluteSpecPath, cleanCode, 'utf-8');
   console.log(`\n🎉 Successfully patched: ${specPath}`);
 
-  // Notify shorky-cloud of the successful fix (non-blocking / best-effort)
   await notifyShorkyCloud(specPath.replace(/^\/+/, ''), {
     fixedCode: cleanCode,
     explanation: fixResult.explanation,
@@ -286,17 +270,13 @@ export async function runOfflineFix({ tracePath, specPath }: RunOfflineFixOption
 
 function sanitizeGeneratedCode(rawCode: string): string {
   return rawCode
-    // 1. Strip markdown fences (```typescript ... ```)
     .replace(/^```[a-z]*\n?/i, '')
     .replace(/\n?```$/i, '')
-    // 2. Strip LLM header comments like "// tests/fixed-login.spec.ts" or "// tests/broken-login.spec.ts"
     .replace(/^\/\/\s*[^\n]*\.spec\.[tj]s\n?/i, '')
-    // 3. Normalize CRLF to standard LF
     .replace(/\r\n/g, '\n')
     .trim() + '\n';
 }
 
-// --- Direct CLI Execution Guard ---
 if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('src/cli/fixTrace.ts')) {
   const args = process.argv.slice(2);
   let tracePath = '';
@@ -317,13 +297,11 @@ if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('src/cli/fix
   }
 
   if (reportPath) {
-    // New flow: read failed tests directly from a Playwright JSON report
     runReportFix({ reportPath }).catch((err) => {
       console.error('❌ Unhandled error in runReportFix:', err);
       process.exit(1);
     });
   } else if (tracePath && specPath) {
-    // Legacy flow: manual invocation with an explicit trace + spec pair
     runOfflineFix({ tracePath, specPath }).catch((err) => {
       console.error('❌ Unhandled error in runOfflineFix:', err);
       process.exit(1);
