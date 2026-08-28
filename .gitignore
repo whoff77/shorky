@@ -11,3 +11,9 @@ node_modules/
 tests/generated-*.spec.ts
 tests/generated-*.trace.json
 *.trace.json
+
+# Compiled TypeScript artifacts that should never live inside src/
+src/**/*.js
+src/**/*.js.map
+playwright.js
+playwright.js.map

@@ -1,13 +1,14 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+const shorkyCloud_1 = require("../config/shorkyCloud");
 class ShorkyCloudReporter {
     apiEndpoint;
     apiKey;
     testItems = [];
     runData;
     constructor() {
-        this.apiEndpoint = process.env.SHORKY_CLOUD_URL || 'http://localhost:3000/api/v1/telemetry';
-        this.apiKey = process.env.SHORKY_CLOUD_API_KEY || '';
+        this.apiEndpoint = (0, shorkyCloud_1.getShorkyCloudTelemetryUrl)();
+        this.apiKey = (0, shorkyCloud_1.getShorkyCloudApiKey)();
         this.runData = {
             passed: 0,
             failed: 0,
@@ -38,10 +39,9 @@ class ShorkyCloudReporter {
         });
     }
     async onEnd(result) {
-        const cloudUrl = process.env.SHORKY_CLOUD_URL || 'http://localhost:3000/api/v1/telemetry';
-        const isCloudEnabled = process.env.ENABLE_SHORKY_CLOUD === 'true' || process.env.SHORKY_CLOUD_URL;
+        const cloudUrl = (0, shorkyCloud_1.getShorkyCloudTelemetryUrl)();
         // Skip attempting transmission entirely if cloud is explicitly disabled
-        if (!isCloudEnabled && !process.env.SHORKY_CLOUD_URL) {
+        if (!(0, shorkyCloud_1.isShorkyCloudEnabled)()) {
             console.log('ℹ️ [Shorky Cloud] Telemetry transmission skipped (SHORKY_CLOUD_URL not configured).');
             return;
         }
@@ -68,7 +68,7 @@ class ShorkyCloudReporter {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-shorky-api-key': process.env.SHORKY_CLOUD_API_KEY || '',
+                    'x-shorky-api-key': (0, shorkyCloud_1.getShorkyCloudApiKey)(),
                 },
                 body: JSON.stringify(telemetryPayload),
                 // Set a short timeout so offline runs don't hang execution

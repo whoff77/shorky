@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 import dotenv from 'dotenv';
 import path from 'path';
+import { isShorkyCloudEnabled } from './src/config/shorkyCloud';
 
 // Load environment variables from .env file
 dotenv.config({ path: path.resolve(__dirname, '.env') });
@@ -11,7 +12,7 @@ const reporters: any[] = [
 ];
 
 // Only add Shorky Cloud reporter if explicitly enabled or URL is provided
-if (process.env.SHORKY_CLOUD_URL || process.env.ENABLE_SHORKY_CLOUD === 'true') {
+if (isShorkyCloudEnabled()) {
   reporters.push(['./src/reporters/cloudReporter.ts']);
 }
 

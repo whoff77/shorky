@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { parsePlaywrightTrace } from '../engine/traceParser';
 import { generateSpecFix, FixResult } from '../engine/codeFixer';
+import { getShorkyCloudApiKey, getShorkyCloudWebhookUrl } from '../config/shorkyCloud';
 
 import dotenv from 'dotenv';
 dotenv.config();
@@ -13,8 +14,8 @@ dotenv.config();
  * crashes the local CLI workflow.
  */
 async function notifyShorkyCloud(specPath: string, fixResult: { fixedCode: string; explanation: string }) {
-  const shorkyCloudBaseUrl = process.env.SHORKY_CLOUD_URL || 'http://localhost:3000';
-  const webhookUrl = `${shorkyCloudBaseUrl.replace(/\/api\/v1\/telemetry\/?$/, '')}/api/webhook`;
+  const webhookUrl = getShorkyCloudWebhookUrl('http://localhost:3000');
+  console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
 
   // Ensure no leading slash before sending to GitHub API
   const sanitizedSpecPath = specPath.replace(/^\/+/, '');
@@ -33,7 +34,7 @@ async function notifyShorkyCloud(specPath: string, fixResult: { fixedCode: strin
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-shorky-api-key': process.env.SHORKY_CLOUD_API_KEY || '',
+        'x-shorky-api-key': getShorkyCloudApiKey(),
       },
       body: JSON.stringify(payload),
     });
@@ -145,15 +146,15 @@ function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecI
  * swallows network failures so a missing/unreachable cloud never breaks CI.
  */
 async function dispatchFailureTelemetry(failure: FailedSpecInfo): Promise<void> {
-  const shorkyCloudUrl = process.env.SHORKY_CLOUD_URL || 'https://shorky-cloud.vercel.app';
-  const shorkyCloudApiKey = process.env.SHORKY_CLOUD_API_KEY;
+  const shorkyCloudApiKey = getShorkyCloudApiKey();
 
-  if (!shorkyCloudUrl || !shorkyCloudApiKey) {
+  if (!process.env.SHORKY_CLOUD_URL || !shorkyCloudApiKey) {
     console.log(`ℹ️ SHORKY_CLOUD_URL/SHORKY_CLOUD_API_KEY not configured. Skipping telemetry dispatch for ${failure.specPath}.`);
     return;
   }
 
-  const webhookUrl = `${shorkyCloudUrl.replace(/\/+$/, '')}/api/webhook`;
+  const webhookUrl = getShorkyCloudWebhookUrl();
+  console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
 
   const payload = {
     specPath: failure.specPath.replace(/^\/+/, ''),

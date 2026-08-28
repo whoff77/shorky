@@ -9,6 +9,7 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const traceParser_1 = require("../engine/traceParser");
 const codeFixer_1 = require("../engine/codeFixer");
+const shorkyCloud_1 = require("../config/shorkyCloud");
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
 /**
@@ -18,8 +19,8 @@ dotenv_1.default.config();
  * crashes the local CLI workflow.
  */
 async function notifyShorkyCloud(specPath, fixResult) {
-    const shorkyCloudBaseUrl = process.env.SHORKY_CLOUD_URL || 'http://localhost:3000';
-    const webhookUrl = `${shorkyCloudBaseUrl.replace(/\/api\/v1\/telemetry\/?$/, '')}/api/webhook`;
+    const webhookUrl = (0, shorkyCloud_1.getShorkyCloudWebhookUrl)('http://localhost:3000');
+    console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
     // Ensure no leading slash before sending to GitHub API
     const sanitizedSpecPath = specPath.replace(/^\/+/, '');
     const payload = {
@@ -35,7 +36,7 @@ async function notifyShorkyCloud(specPath, fixResult) {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'x-shorky-api-key': process.env.SHORKY_CLOUD_API_KEY || '',
+                'x-shorky-api-key': (0, shorkyCloud_1.getShorkyCloudApiKey)(),
             },
             body: JSON.stringify(payload),
         });
@@ -96,13 +97,13 @@ function collectFailedSpecsFromReport(report) {
  * swallows network failures so a missing/unreachable cloud never breaks CI.
  */
 async function dispatchFailureTelemetry(failure) {
-    const shorkyCloudUrl = process.env.SHORKY_CLOUD_URL || 'https://shorky-cloud.vercel.app';
-    const shorkyCloudApiKey = process.env.SHORKY_CLOUD_API_KEY;
-    if (!shorkyCloudUrl || !shorkyCloudApiKey) {
+    const shorkyCloudApiKey = (0, shorkyCloud_1.getShorkyCloudApiKey)();
+    if (!process.env.SHORKY_CLOUD_URL || !shorkyCloudApiKey) {
         console.log(`ℹ️ SHORKY_CLOUD_URL/SHORKY_CLOUD_API_KEY not configured. Skipping telemetry dispatch for ${failure.specPath}.`);
         return;
     }
-    const webhookUrl = `${shorkyCloudUrl.replace(/\/+$/, '')}/api/webhook`;
+    const webhookUrl = (0, shorkyCloud_1.getShorkyCloudWebhookUrl)();
+    console.log(`🌐 Using sanitized shorky-cloud URL: ${webhookUrl}`);
     const payload = {
         specPath: failure.specPath.replace(/^\/+/, ''),
         traceZipPath: failure.traceZipPath || null,
