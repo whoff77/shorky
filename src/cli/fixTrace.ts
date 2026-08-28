@@ -9,8 +9,8 @@ dotenv.config();
 
 /**
  * Notifies shorky-cloud that a spec fix has been generated or sends initial 
- * telemetry. Uses empty strings instead of null for code/explanation to 
- * satisfy Zod string validation rules on the backend endpoint.
+ * telemetry. Uses placeholder strings for code/explanation to satisfy 
+ * backend Zod validation rules requiring >=1 character.
  */
 async function notifyShorkyCloud(
   specPath: string, 
@@ -27,8 +27,8 @@ async function notifyShorkyCloud(
     specPath: sanitizedSpecPath,
     traceZipPath: traceZipPath || null,
     errorLog: errorLog || null,
-    fixedCode: fixResult.fixedCode || '',
-    explanation: fixResult.explanation || '',
+    fixedCode: fixResult.fixedCode || '// pending fix generation',
+    explanation: fixResult.explanation || 'Pending initial telemetry upload',
   };
 
   const webhookUrl = getShorkyCloudWebhookUrl(process.env.SHORKY_CLOUD_URL);
@@ -149,7 +149,7 @@ async function dispatchFailureTelemetry(failure: FailedSpecInfo): Promise<void> 
 
   await notifyShorkyCloud(
     failure.specPath,
-    { fixedCode: '', explanation: '' },
+    { fixedCode: '// telemetry event', explanation: 'Initial test failure telemetry report' },
     failure.traceZipPath,
     failure.errorLog
   );
