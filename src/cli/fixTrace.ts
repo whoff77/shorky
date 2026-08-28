@@ -27,8 +27,8 @@ async function notifyShorkyCloud(
     specPath: sanitizedSpecPath,
     traceZipPath: traceZipPath || null,
     errorLog: errorLog || null,
-    fixedCode: fixResult.fixedCode || '// pending fix generation',
-    explanation: fixResult.explanation || 'Pending initial telemetry upload',
+    fixedCode: fixResult.fixedCode || '',
+    explanation: fixResult.explanation || '',
   };
 
   const webhookUrl = getShorkyCloudWebhookUrl(process.env.SHORKY_CLOUD_URL);
@@ -185,8 +185,8 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
       console.log(`💥 Error: ${failure.errorLog}`);
     }
 
-    // REMOVED duplicate dispatchFailureTelemetry(failure) call here 
-    // to prevent firing multiple webhook requests per test.
+    // Restore telemetry ping so shorky-cloud recognizes the failure event
+    await dispatchFailureTelemetry(failure);
 
     if (failure.traceZipPath && fs.existsSync(failure.traceZipPath) && fs.existsSync(failure.specPath)) {
       try {
@@ -241,14 +241,19 @@ export async function runOfflineFix({ tracePath, specPath }: RunOfflineFixOption
   console.log(`\n--- Code Diff Preview ---`);
   console.log(fixResult.fixedCode);
 
-  const cleanCode = sanitizeGeneratedCode(fixResult.fixedCode);
+  // Safeguard: If the LLM returned empty code or stripped out the entire file content, do not overwrite it.
+  const cleaned = sanitizeGeneratedCode(fixResult.fixedCode);
+  if (!cleaned || cleaned.length < 15 || !cleaned.includes('test(')) {
+    console.error(`❌ Error: LLM generated invalid or empty spec code for ${specPath}. Aborting file write to protect test suite.`);
+    return;
+  }
 
-  fs.writeFileSync(absoluteSpecPath, cleanCode, 'utf-8');
+  fs.writeFileSync(absoluteSpecPath, cleaned, 'utf-8');
   console.log(`\n🎉 Successfully patched: ${specPath}`);
 
   await notifyShorkyCloud(
     specPath,
-    { fixedCode: cleanCode, explanation: fixResult.explanation },
+    { fixedCode: cleaned, explanation: fixResult.explanation },
     absoluteTracePath,
     failureContext.errorMessage
   );
