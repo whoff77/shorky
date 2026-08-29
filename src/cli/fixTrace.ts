@@ -110,15 +110,27 @@ function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecI
         if (results.length === 0) continue;
 
         // Playwright records one entry per attempt (initial run + each
-        // retry) in chronological order. Only the *last* entry reflects the
-        // final outcome of the test and points at the trace.zip/attachments
-        // from the final retry directory — earlier entries refer to stale
-        // retry-numbered directories (e.g. "-retry1") that may have already
-        // been cleaned up or don't represent the terminal failure state.
+        // retry) in chronological order. The *last* entry reflects the
+        // final/terminal outcome of the test and is what determines whether
+        // the test is considered failed overall.
         const finalResult = results[results.length - 1];
 
         if (finalResult.status !== 'failed' && finalResult.status !== 'timedOut') {
           continue;
+        }
+
+        // Depending on the configured `trace` mode (e.g. 'on-first-retry'),
+        // the *final* attempt is not guaranteed to carry its own trace.zip
+        // attachment — only an earlier retry might have one. Search every
+        // attempt from most-recent to oldest and use the first trace.zip we
+        // find, so we never report a false "N/A" when a usable trace exists
+        // on an earlier attempt. (With trace: 'retain-on-failure'/'on', every
+        // failed attempt has its own trace, so this simply picks the final
+        // attempt's trace in that case.)
+        let traceAttachment: ReportAttachment | undefined;
+        for (let i = results.length - 1; i >= 0; i--) {
+          traceAttachment = results[i].attachments?.find((a) => a.name === 'trace' && !!a.path);
+          if (traceAttachment) break;
         }
 
         // spec.file may already be relative (as emitted by the Playwright
@@ -144,7 +156,6 @@ function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecI
           continue;
         }
 
-        const traceAttachment = finalResult.attachments?.find((a) => a.name === 'trace');
         const errorLog = finalResult.error?.message || finalResult.errors?.[0]?.message;
 
         failuresBySpec.set(resolvedSpecPath, {
@@ -200,14 +211,27 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
     // Completely removed duplicate pre-telemetry ping (`dispatchFailureTelemetry`) 
     // to stop the triplet job expansion. Only run the offline fix cycle.
 
-    if (failure.traceZipPath && fs.existsSync(failure.traceZipPath) && fs.existsSync(failure.specPath)) {
+    // Playwright's JSON reporter emits absolute attachment paths by default,
+    // but resolve defensively (relative to cwd) in case a report was
+    // generated with relative paths or moved between machines.
+    const resolvedTraceZipPath = failure.traceZipPath ? path.resolve(failure.traceZipPath) : undefined;
+    const resolvedSpecFsPath = path.resolve(failure.specPath);
+
+    if (resolvedTraceZipPath && fs.existsSync(resolvedTraceZipPath) && fs.existsSync(resolvedSpecFsPath)) {
       try {
-        await runOfflineFix({ tracePath: failure.traceZipPath, specPath: failure.specPath });
+        await runOfflineFix({ tracePath: resolvedTraceZipPath, specPath: failure.specPath });
       } catch (err) {
         console.error(`❌ Error running fixTrace for ${failure.specPath}:`, err instanceof Error ? err.message : err);
       }
     } else {
-      console.warn(`⚠️ Skipping offline fix for ${failure.specPath} — trace.zip or spec file not found on disk.`);
+      const missing: string[] = [];
+      if (!resolvedTraceZipPath || !fs.existsSync(resolvedTraceZipPath)) {
+        missing.push(`trace.zip (${resolvedTraceZipPath || 'N/A'})`);
+      }
+      if (!fs.existsSync(resolvedSpecFsPath)) {
+        missing.push(`spec file (${resolvedSpecFsPath})`);
+      }
+      console.warn(`⚠️ Skipping offline fix for ${failure.specPath} — missing on disk: ${missing.join(', ')}.`);
     }
   }
 }

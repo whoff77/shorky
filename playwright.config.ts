@@ -34,8 +34,11 @@ export default defineConfig({
     /* Base URL to use in actions like `await page.goto('')`. */
     // baseURL: 'http://localhost:3000',
 
-    /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
-    trace: 'on-first-retry',
+    /* Always keep a trace.zip for every failed attempt (not just the first
+     * retry) so Shorky's report-driven auto-fix pipeline can always locate a
+     * trace for the final/terminal attempt of a failing test.
+     * See https://playwright.dev/docs/trace-viewer */
+    trace: 'retain-on-failure',
   },
 
   /* Configure projects for major browsers */

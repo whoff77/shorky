@@ -37,5 +37,10 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         REPORT_PATH: ${{ inputs.report-path }}
       run: |
+        if [ -z "$OPENAI_API_KEY" ]; then
+          echo "⚠️ OPENAI_API_KEY is empty. Set the 'openai-api-key' input (e.g. openai-api-key: \${{ secrets.OPENAI_API_KEY }}) and ensure the OPENAI_API_KEY secret is configured in this repository's settings. Offline LLM-powered fixes will fail without it."
+        else
+          echo "✅ OPENAI_API_KEY is set (length: ${#OPENAI_API_KEY})."
+        fi
         echo "🔍 Resolving failed specs and traces from Playwright JSON report..."
         npx tsx src/cli/fixTrace.ts --report "$REPORT_PATH"

@@ -27,7 +27,14 @@ export async function generateSpecFix(
   specCode: string,
   failureContext: TraceFailureContext
 ): Promise<FixResult> {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      'OPENAI_API_KEY is missing or empty. In CI, ensure the secret is configured in the repository/organization settings and explicitly mapped into the workflow/action env (e.g. `OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}`).'
+    );
+  }
+
+  const openai = new OpenAI({ apiKey });
 
   const prompt = `
 You are an expert SDET specializing in Playwright TypeScript test automation.
