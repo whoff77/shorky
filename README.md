@@ -18,43 +18,38 @@ Instead of running expensive, unpredictable LLM reasoning loops on every single 
 ---
 
 ## Architecture
-
-                     [ NATURAL LANGUAGE GOAL ]
-                                 │
-                                 ▼
-                   ┌───────────────────────────┐
-                   │   Shorky ReAct Agent      │
-                   │   (OpenAI Tool Calling)   │
-                   └─────────────┬─────────────┘
-                                 │
-           ┌─────────────────────┴─────────────────────┐
-           ▼                                           ▼
-
-
-┌──────────────────────────┐                ┌──────────────────────────┐
-│  Auto-Healing Fixture    │                │  Visual Regression       │
-│  (Dynamic DOM Intercept) │                │  (Pixelmatch Engine)     │
-└────────────┬─────────────┘                └────────────┬─────────────┘
-│                                           │
-└─────────────────────┬─────────────────────┘
-│
-▼
-┌───────────────────────────┐
-│   Code Synthesis Engine   │
-│      (generator.ts)       │
-└─────────────┬─────────────┘
-│
-▼
-┌───────────────────────────┐
-│   Static Playwright Spec  │
-│   (*.generated.spec.ts)   │
-└─────────────┬─────────────┘
-│
-▼
-┌───────────────────────────┐
-│  Deterministic CI Pipeline│
-│  (Zero-LLM Latency / $0)  │
-└───────────────────────────┘
+```text
+[ NATURAL LANGUAGE GOAL ]
+           │
+           ▼
+┌─────────────────────────────┐
+│    Shorky ReAct Agent       │
+│    (OpenAI Tool Calling)    │
+└──────────┬──────────────────┘
+           │
+           ▼
+┌─────────────────────────────┐
+│   Auto-Healing Fixture &    │
+│    Visual Regression        │
+└──────────┬──────────────────┘
+           │
+           ▼
+┌─────────────────────────────┐
+│    Code Synthesis Engine    │
+│       (generator.ts)        │
+└──────────┬──────────────────┘
+           │
+           ▼
+┌─────────────────────────────┐
+│   Static Playwright Spec    │
+│   (*.generated.spec.ts)     │
+└──────────┬──────────────────┘
+           │
+           ▼
+┌─────────────────────────────┐
+│  Deterministic CI Pipeline  │
+│   (Zero-LLM Latency / $0)   │
+└─────────────────────────────┘
 
 ---
 
