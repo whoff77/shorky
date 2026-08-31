@@ -17,3 +17,4 @@ src/**/*.js
 src/**/*.js.map
 playwright.js
 playwright.js.map
+/playwright.config.js

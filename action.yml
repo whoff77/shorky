@@ -38,7 +38,7 @@ runs:
         REPORT_PATH: ${{ inputs.report-path }}
       run: |
         if [ -z "$OPENAI_API_KEY" ]; then
-          echo "⚠️ OPENAI_API_KEY is empty. Set the 'openai-api-key' input (e.g. openai-api-key: \${{ secrets.OPENAI_API_KEY }}) and ensure the OPENAI_API_KEY secret is configured in this repository's settings. Offline LLM-powered fixes will fail without it."
+          echo "⚠️ OPENAI_API_KEY is empty. Set the 'openai-api-key' input (e.g. openai-api-key: $\{{ secrets.OPENAI_API_KEY }}) and ensure the OPENAI_API_KEY secret is configured in this repository's settings. Offline LLM-powered fixes will fail without it."
         else
           echo "✅ OPENAI_API_KEY is set (length: ${#OPENAI_API_KEY})."
         fi
