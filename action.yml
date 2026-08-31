@@ -1,5 +1,5 @@
 name: 'Shorky AI Test Auto-Healer'
-description: 'Captures Playwright test failure telemetry and dispatches to shorky-cloud for auto-healing PRs.'
+description: 'Captures Playwright test failure telemetry, analyzes failures with AI, and automatically opens pull requests with code fixes.'
 author: 'Shorky'
 branding:
   icon: 'aperture'
