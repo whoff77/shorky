@@ -38,4 +38,4 @@ runs:
         REPORT_PATH: ${{ inputs.report-path }}
       run: |
         echo "🔍 Resolving failed specs and traces from Playwright JSON report..."
-        npx tsx src/cli/fixTrace.ts --report "$REPORT_PATH"
+        npx tsx "${{ github.action_path }}/src/cli/fixTrace.ts" --report "$REPORT_PATH"
