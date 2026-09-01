@@ -10,6 +10,7 @@ const path_1 = __importDefault(require("path"));
 const traceParser_1 = require("../engine/traceParser");
 const codeFixer_1 = require("../engine/codeFixer");
 const shorkyCloud_1 = require("../config/shorkyCloud");
+const githubPr_1 = require("../utils/githubPr");
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
 /**
@@ -207,6 +208,19 @@ async function runOfflineFix({ tracePath, specPath }) {
     }
     fs_1.default.writeFileSync(absoluteSpecPath, cleaned, 'utf-8');
     console.log(`\n🎉 Successfully patched: ${specPath}`);
+    // Commit the fix on a new branch, push it, and open a pull request via
+    // the GitHub REST API using GITHUB_TOKEN. This is what actually surfaces
+    // the healed test as a reviewable PR in the consumer repository — the
+    // shorky-cloud webhook below is purely optional telemetry/dashboard
+    // notification and does not create the PR itself.
+    const prUrl = await (0, githubPr_1.openHealingPullRequest)({
+        specPath,
+        explanation: fixResult.explanation,
+        errorLog: failureContext.errorMessage,
+    });
+    if (!prUrl) {
+        console.warn(`⚠️ No pull request was opened for ${specPath}. Ensure GITHUB_TOKEN and GITHUB_REPOSITORY are set, and that the workflow grants "contents: write" and "pull-requests: write" permissions.`);
+    }
     // Single unified webhook dispatch containing the genuine fix payload
     await notifyShorkyCloud(specPath, { fixedCode: cleaned, explanation: fixResult.explanation }, absoluteTracePath, failureContext.errorMessage);
 }
