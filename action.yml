@@ -28,6 +28,13 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - name: Install Shorky action dependencies
+      shell: bash
+      run: |
+        echo "📦 Installing Shorky's own dependencies (unzipper, openai, dotenv, etc.) into ${{ github.action_path }}..."
+        cd "${{ github.action_path }}"
+        npm ci --no-audit --no-fund
+
     - name: Run Shorky Fix Analyzer on Failed Traces
       shell: bash
       env:

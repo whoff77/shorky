@@ -1,6 +1,6 @@
 {
   "name": "shorky",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "",
   "main": "index.js",
   "bin": {
@@ -38,7 +38,6 @@
     "dotenv": "^17.4.2",
     "openai": "^7.5.0",
     "playwright-core": "^1.62.1",
-    "shorky": "file:../shorky",
     "undici-types": "^8.3.0",
     "unzipper": "^0.12.5"
   },
