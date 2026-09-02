@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { parsePlaywrightTrace, resolveSpecSourcePath } from '../engine/traceParser';
+import { parsePlaywrightTrace, resolveSpecSourcePath, isVisualRegressionFailure } from '../engine/traceParser';
 import { generateSpecFix, FixResult } from '../engine/codeFixer';
 import { getShorkyCloudApiKey, getShorkyCloudWebhookUrl } from '../config/shorkyCloud';
 import { HealedFixEntry, openHealingPullRequest, pushConsolidatedHealingBranch, stageHealingFix } from '../utils/githubPr';
@@ -93,10 +93,42 @@ interface PlaywrightJsonReport {
   suites?: ReportSuite[];
 }
 
+/** Expected/actual/diff PNG paths Playwright generates for a failed visual snapshot comparison. */
+export interface VisualDiffArtifacts {
+  expectedPath?: string;
+  actualPath?: string;
+  diffPath?: string;
+}
+
 export interface FailedSpecInfo {
   specPath: string;
   traceZipPath?: string;
   errorLog?: string;
+  /** True when this failure is a visual regression (screenshot/pixel) mismatch, not a DOM/action failure. */
+  isVisualRegression?: boolean;
+  /** Populated only when isVisualRegression is true. */
+  visualDiff?: VisualDiffArtifacts;
+}
+
+/**
+ * Extracts the expected/actual/diff PNG attachment paths Playwright records
+ * for a failed `toHaveScreenshot`/`toMatchSnapshot` assertion. Playwright
+ * names these attachments `<snapshotName>-expected.png`,
+ * `<snapshotName>-actual.png`, and `<snapshotName>-diff.png` respectively.
+ */
+function extractVisualDiffArtifacts(attachments: ReportAttachment[] | undefined): VisualDiffArtifacts {
+  const artifacts: VisualDiffArtifacts = {};
+  for (const attachment of attachments || []) {
+    if (!attachment.path) continue;
+    if (/-expected\.png$/i.test(attachment.name)) {
+      artifacts.expectedPath = attachment.path;
+    } else if (/-actual\.png$/i.test(attachment.name)) {
+      artifacts.actualPath = attachment.path;
+    } else if (/-diff\.png$/i.test(attachment.name)) {
+      artifacts.diffPath = attachment.path;
+    }
+  }
+  return artifacts;
 }
 
 function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecInfo[] {
@@ -150,10 +182,31 @@ function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecI
 
         const errorLog = finalResult.error?.message || finalResult.errors?.[0]?.message;
 
+        // Detect visual regression (screenshot/pixel-diff) failures so they
+        // can be routed into "Visual Diff Handoff" mode instead of the
+        // normal LLM code-repair flow — adjusting selectors/actions can
+        // never fix a genuine pixel discrepancy.
+        const isVisual = isVisualRegressionFailure(errorLog);
+        let visualDiff: VisualDiffArtifacts | undefined;
+        if (isVisual) {
+          // Scan every attempt (most-recent first) for the expected/actual/
+          // diff PNGs, mirroring the trace-attachment lookup above, in case
+          // they don't happen to live on the final result entry.
+          for (let i = results.length - 1; i >= 0; i--) {
+            const candidate = extractVisualDiffArtifacts(results[i].attachments);
+            if (candidate.expectedPath || candidate.actualPath || candidate.diffPath) {
+              visualDiff = candidate;
+              break;
+            }
+          }
+        }
+
         failuresBySpec.set(resolvedSpecPath, {
           specPath: resolvedSpecPath,
           traceZipPath: traceAttachment?.path,
           errorLog,
+          isVisualRegression: isVisual,
+          visualDiff,
         });
       }
     }
@@ -208,6 +261,40 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
 
     // Completely removed duplicate pre-telemetry ping (`dispatchFailureTelemetry`) 
     // to stop the triplet job expansion. Only run the offline fix cycle.
+
+    // --- Visual Diff Handoff ---
+    // Shorky's ReAct agent only synthesizes DOM/action-level code (selector
+    // and interaction fixes) — it has no way to adjust pixelmatch
+    // thresholds, rewrite baseline snapshots, or otherwise resolve a
+    // genuine visual discrepancy. Previously, attempting an LLM code repair
+    // for these failures caused the agent to "fix" unrelated selectors,
+    // which never resolves the pixel mismatch and triggers a re-fail /
+    // re-heal loop. Instead, bypass code generation entirely for visual
+    // regressions and hand the diagnostic artifacts straight to the PR for
+    // human review.
+    if (failure.isVisualRegression) {
+      console.log(`🖼️ Detected a visual regression failure for ${failure.specPath}. Bypassing LLM code repair (Visual Diff Handoff).`);
+      if (failure.visualDiff?.expectedPath) console.log(`   - Expected: ${failure.visualDiff.expectedPath}`);
+      if (failure.visualDiff?.actualPath) console.log(`   - Actual:   ${failure.visualDiff.actualPath}`);
+      if (failure.visualDiff?.diffPath) console.log(`   - Diff:     ${failure.visualDiff.diffPath}`);
+
+      const visualHandoffFix: HealedFixEntry = {
+        specPath: failure.specPath,
+        explanation:
+          'Visual regression detected — code-level repair skipped. Review the pixel diff artifacts and update the baseline snapshot or fix the UI as appropriate.',
+        errorLog: failure.errorLog,
+        isVisualRegression: true,
+        visualDiff: failure.visualDiff,
+      };
+
+      try {
+        stageHealingFix(visualHandoffFix);
+      } catch (err: any) {
+        console.warn(`⚠️ Failed to stage the visual diff handoff entry for ${failure.specPath}:`, err.message || err);
+      }
+      healedFixes.push(visualHandoffFix);
+      continue;
+    }
 
     // Playwright's JSON reporter emits absolute attachment paths by default,
     // but resolve defensively (relative to cwd) in case a report was
@@ -295,6 +382,39 @@ export async function runOfflineFix({ tracePath, specPath, batchMode = false }: 
     console.log(`   - Action: ${failureContext.actionMethod}`);
     console.log(`   - Selector: ${failureContext.failedSelector}`);
     console.log(`   - Error: ${failureContext.errorMessage}`);
+  }
+
+  // --- Visual Diff Handoff ---
+  // See runReportFix() for the full rationale: Shorky's ReAct agent only
+  // synthesizes DOM/action-level code and cannot resolve genuine pixel
+  // discrepancies, so bypass the LLM code repair entirely for visual
+  // regression failures and hand the diagnostics off for human review
+  // instead of risking an invalid "fix" that re-fails and loops.
+  if (isVisualRegressionFailure(failureContext.errorMessage)) {
+    console.log(`🖼️ Detected a visual regression failure for ${specPath}. Bypassing LLM code repair (Visual Diff Handoff).`);
+
+    const visualHandoffFix: HealedFixEntry = {
+      specPath,
+      explanation:
+        'Visual regression detected — code-level repair skipped. Review the pixel diff artifacts and update the baseline snapshot or fix the UI as appropriate.',
+      errorLog: failureContext.errorMessage,
+      isVisualRegression: true,
+    };
+
+    if (batchMode) {
+      try {
+        stageHealingFix(visualHandoffFix);
+      } catch (err: any) {
+        console.warn(`⚠️ Failed to stage the visual diff handoff entry for ${specPath}:`, err.message || err);
+      }
+    } else {
+      const prUrl = await openHealingPullRequest(visualHandoffFix);
+      if (!prUrl) {
+        console.warn(`⚠️ No pull request was opened for the visual regression review entry for ${specPath}.`);
+      }
+    }
+
+    return visualHandoffFix;
   }
 
   console.log(`\n🤖 Sending failure context & ${specPath} to LLM Fixer...`);

@@ -2,6 +2,13 @@
 import { execFileSync } from 'child_process';
 import path from 'path';
 
+/** Expected/actual/diff PNG paths for a visual regression failure being flagged for human review. */
+export interface VisualDiffArtifactPaths {
+  expectedPath?: string;
+  actualPath?: string;
+  diffPath?: string;
+}
+
 /** A single healed spec file to include in the consolidated healing PR. */
 export interface HealedFixEntry {
   /** Path (absolute or relative to the repo root / cwd) of the spec file that was patched. */
@@ -10,6 +17,14 @@ export interface HealedFixEntry {
   explanation: string;
   /** The original failing error message, if available (used in the PR body). */
   errorLog?: string | null;
+  /**
+   * When true, this entry represents a visual regression (screenshot/pixel
+   * diff) failure that was intentionally NOT code-repaired by the LLM —
+   * only flagged for human review. No file was modified for this entry.
+   */
+  isVisualRegression?: boolean;
+  /** Populated only when isVisualRegression is true. */
+  visualDiff?: VisualDiffArtifactPaths;
 }
 
 /** @deprecated kept as an alias for HealedFixEntry for backward compatibility. */
@@ -82,11 +97,15 @@ async function findExistingOpenPr(
 
 /** Builds the aggregated PR body describing every healed fix in this run. */
 function buildPrBody(fixes: HealedFixEntry[], repoRoot: string): string {
-  const sections = fixes.map((fix) => {
-    const relativeSpecPath = path.isAbsolute(fix.specPath) ? path.relative(repoRoot, fix.specPath) : fix.specPath;
+  const toRelative = (specPath: string) =>
+    path.isAbsolute(specPath) ? path.relative(repoRoot, specPath) : specPath;
 
+  const codeFixes = fixes.filter((fix) => !fix.isVisualRegression);
+  const visualFixes = fixes.filter((fix) => fix.isVisualRegression);
+
+  const codeSections = codeFixes.map((fix) => {
     return [
-      `### \`${relativeSpecPath}\``,
+      `### \`${toRelative(fix.specPath)}\``,
       '',
       fix.explanation || '_No explanation provided by the LLM._',
       fix.errorLog ? `\n**Original failure:**\n\`\`\`\n${fix.errorLog}\n\`\`\`` : '',
@@ -95,8 +114,52 @@ function buildPrBody(fixes: HealedFixEntry[], repoRoot: string): string {
       .join('\n');
   });
 
+  const visualSections = visualFixes.map((fix) => {
+    const diff = fix.visualDiff || {};
+    const artifactLines = [
+      diff.expectedPath ? `- **Expected:** \`${diff.expectedPath}\`` : null,
+      diff.actualPath ? `- **Actual:** \`${diff.actualPath}\`` : null,
+      diff.diffPath ? `- **Diff:** \`${diff.diffPath}\`` : null,
+    ].filter(Boolean);
+
+    return [
+      `### \`${toRelative(fix.specPath)}\``,
+      '',
+      'Shorky detected a **visual regression** (screenshot/pixel-diff mismatch) for this test. ' +
+        'Code-level repairs (selectors, actions, locators) cannot fix a genuine pixel discrepancy, ' +
+        'so this test was intentionally left unmodified — please review the diff artifacts below and ' +
+        'either update the baseline snapshot or fix the underlying visual issue manually.',
+      '',
+      artifactLines.length > 0 ? artifactLines.join('\n') : '_No diff artifact paths were found in the report._',
+      fix.errorLog ? `\n**Original failure:**\n\`\`\`\n${fix.errorLog}\n\`\`\`` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  });
+
+  const sections: string[] = [];
+  if (codeSections.length > 0) {
+    sections.push('## 🩹 Code Fixes', '', ...codeSections);
+  }
+  if (visualSections.length > 0) {
+    if (sections.length > 0) sections.push('');
+    sections.push(
+      '## 🖼️ [Visual Review Required]',
+      '',
+      'The following test(s) failed due to visual regressions and were **not** auto-repaired. ' +
+        'They require a human to review the pixel diff and either accept the new UI (update the ' +
+        'baseline snapshot) or fix the visual bug.',
+      '',
+      ...visualSections
+    );
+  }
+
+  const summaryParts = [];
+  if (codeFixes.length > 0) summaryParts.push(`${codeFixes.length} code fix(es)`);
+  if (visualFixes.length > 0) summaryParts.push(`${visualFixes.length} visual regression(s) flagged for review`);
+
   return [
-    `🤖 **Shorky** automatically detected ${fixes.length} failing test(s) and generated fixes for all of them.`,
+    `🤖 **Shorky** automatically processed ${fixes.length} failing test(s): ${summaryParts.join(' and ')}.`,
     '',
     ...sections,
     '',
@@ -124,7 +187,10 @@ export function stageHealingFix(fix: HealedFixEntry): void {
   git(['config', 'user.email', 'shorky-bot@users.noreply.github.com'], repoRoot);
 
   // Create the shared branch off the base branch the first time it's
-  // needed in this process; reuse it (already checked out) afterward.
+  // needed in this process; reuse it (already checked out) afterward. This
+  // still happens for visual-regression entries so the branch exists and
+  // the entry can be surfaced in the consolidated PR body, even though no
+  // file is modified/committed for it.
   const currentBranch = git(['rev-parse', '--abbrev-ref', 'HEAD'], repoRoot);
   if (currentBranch !== HEALING_BRANCH_NAME) {
     try {
@@ -133,6 +199,14 @@ export function stageHealingFix(fix: HealedFixEntry): void {
       // Branch may already exist locally from a previous fix in this run.
       git(['checkout', HEALING_BRANCH_NAME], repoRoot);
     }
+  }
+
+  if (fix.isVisualRegression) {
+    // Visual Diff Handoff: no code was generated or file modified for this
+    // failure, so there is nothing to git-add/commit. It's still included
+    // in the consolidated PR body (via buildPrBody) under the
+    // "[Visual Review Required]" section for human review.
+    return;
   }
 
   git(['add', relativeSpecPath], repoRoot);
@@ -174,6 +248,36 @@ export async function pushConsolidatedHealingBranch(fixes: HealedFixEntry[]): Pr
 
   const repoRoot = process.cwd();
   const baseBranch = resolveBaseBranch();
+
+  // If every staged fix was a visual regression (Visual Diff Handoff mode),
+  // no files were modified and no commits exist beyond the base branch.
+  // GitHub rejects pull requests with an identical head/base, so in that
+  // case skip PR creation and instead print the visual diagnostics
+  // directly to the console/workflow logs for visibility.
+  let commitsAhead = 0;
+  try {
+    const countOutput = git(['rev-list', '--count', `${baseBranch}..${HEALING_BRANCH_NAME}`], repoRoot);
+    commitsAhead = parseInt(countOutput, 10) || 0;
+  } catch {
+    // If we can't determine this (e.g. base branch ref unavailable locally),
+    // fall through and let the push/PR attempt below surface any real error.
+    commitsAhead = fixes.some((f) => !f.isVisualRegression) ? 1 : 0;
+  }
+
+  if (commitsAhead === 0) {
+    console.log(
+      `ℹ️ No code changes to commit — ${fixes.length} fix(es) were all visual regressions flagged for human review:`
+    );
+    for (const fix of fixes) {
+      const relPath = path.isAbsolute(fix.specPath) ? path.relative(repoRoot, fix.specPath) : fix.specPath;
+      console.log(`   🖼️ [Visual Review Required] ${relPath}`);
+      if (fix.visualDiff?.expectedPath) console.log(`      - Expected: ${fix.visualDiff.expectedPath}`);
+      if (fix.visualDiff?.actualPath) console.log(`      - Actual:   ${fix.visualDiff.actualPath}`);
+      if (fix.visualDiff?.diffPath) console.log(`      - Diff:     ${fix.visualDiff.diffPath}`);
+    }
+    console.log('ℹ️ Skipping pull request creation since there are no code changes to review.');
+    return null;
+  }
 
   try {
     console.log(`🚀 Pushing consolidated healing branch "${HEALING_BRANCH_NAME}" (${fixes.length} fix(es)) to origin...`);

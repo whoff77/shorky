@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.findLatestTraceZip = findLatestTraceZip;
 exports.extractSpecPathFromTrace = extractSpecPathFromTrace;
+exports.isVisualRegressionFailure = isVisualRegressionFailure;
 exports.resolveSpecSourcePath = resolveSpecSourcePath;
 exports.parsePlaywrightTrace = parsePlaywrightTrace;
 // src/engine/traceParser.ts
@@ -67,6 +68,22 @@ function extractSpecPathFromTrace(traceZipPath, testDir = 'tests') {
         }
     }
     return null;
+}
+/**
+ * Returns true when the provided error message indicates a Playwright
+ * visual regression / screenshot comparison failure (e.g. a
+ * `toHaveScreenshot`/`toMatchSnapshot` pixel-diff mismatch) rather than a
+ * DOM interaction, selector, or navigation failure.
+ *
+ * This is used to route visual failures into "Visual Diff Handoff" mode
+ * instead of attempting invalid, code-level LLM repairs (adjusting
+ * selectors/actions can never fix a genuine pixel discrepancy, and doing so
+ * previously caused a re-fail -> re-heal infinite loop).
+ */
+function isVisualRegressionFailure(errorMessage) {
+    if (!errorMessage)
+        return false;
+    return /toHaveScreenshot|toMatchSnapshot|maxDiffPixelRatio|maxDiffPixels|pixelmatch|screenshot comparison failed|pixels?\s*\(ratio [\d.]+ of all image pixels\) are different/i.test(errorMessage);
 }
 /**
  * Maps a raw `spec.file` value from a Playwright JSON report entry back to

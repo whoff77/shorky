@@ -85,6 +85,24 @@ export function extractSpecPathFromTrace(traceZipPath: string, testDir = 'tests'
 }
 
 /**
+ * Returns true when the provided error message indicates a Playwright
+ * visual regression / screenshot comparison failure (e.g. a
+ * `toHaveScreenshot`/`toMatchSnapshot` pixel-diff mismatch) rather than a
+ * DOM interaction, selector, or navigation failure.
+ *
+ * This is used to route visual failures into "Visual Diff Handoff" mode
+ * instead of attempting invalid, code-level LLM repairs (adjusting
+ * selectors/actions can never fix a genuine pixel discrepancy, and doing so
+ * previously caused a re-fail -> re-heal infinite loop).
+ */
+export function isVisualRegressionFailure(errorMessage?: string | null): boolean {
+  if (!errorMessage) return false;
+  return /toHaveScreenshot|toMatchSnapshot|maxDiffPixelRatio|maxDiffPixels|pixelmatch|screenshot comparison failed|pixels?\s*\(ratio [\d.]+ of all image pixels\) are different/i.test(
+    errorMessage
+  );
+}
+
+/**
  * Maps a raw `spec.file` value from a Playwright JSON report entry back to
  * the exact original source test file path on disk, so downstream healing
  * logic (fixTrace.ts) always overwrites the *same* file that Playwright
