@@ -229,8 +229,16 @@ async function pushConsolidatedHealingBranch(fixes) {
         return null;
     }
     try {
+        // Use a hard --force push rather than --force-with-lease: CI runners
+        // typically perform a shallow/fresh checkout with no remote-tracking
+        // ref for a pre-existing shorky/auto-heal-fixes branch, which causes
+        // --force-with-lease's stale-info safety check to reject the push
+        // (`! [rejected] ... (stale info)`) even though there's no real
+        // conflict. This branch is an automated, bot-managed branch that only
+        // exists to aggregate the current run's fixes, so it is always safe
+        // and correct to unconditionally overwrite it on every run.
         console.log(`🚀 Pushing consolidated healing branch "${exports.HEALING_BRANCH_NAME}" (${fixes.length} fix(es)) to origin...`);
-        git(['push', '--force-with-lease', '--set-upstream', 'origin', exports.HEALING_BRANCH_NAME], repoRoot);
+        git(['push', '--force', '--set-upstream', 'origin', exports.HEALING_BRANCH_NAME], repoRoot);
         const existingPrUrl = await findExistingOpenPr(owner, repo, exports.HEALING_BRANCH_NAME, baseBranch, githubToken);
         if (existingPrUrl) {
             console.log(`🎉 Updated existing consolidated pull request: ${existingPrUrl}`);
