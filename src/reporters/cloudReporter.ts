@@ -6,6 +6,7 @@ import { getShorkyCloudApiKey, getShorkyCloudTelemetryUrl, isShorkyCloudEnabled 
 interface TestRunItem {
   title: string;
   status: 'passed' | 'failed' | 'healed';
+  error?: string;
 }
 
 export default class ShorkyCloudReporter implements Reporter {
@@ -47,9 +48,12 @@ export default class ShorkyCloudReporter implements Reporter {
       testStatus = 'failed';
     }
 
+    const errorMessage = result.error?.message || result.error?.stack;
+
     this.testItems.push({
       title: test.title,
       status: testStatus,
+      error: errorMessage,
     });
   }
 
@@ -79,8 +83,8 @@ export default class ShorkyCloudReporter implements Reporter {
         tests: this.testItems.map((item) => ({
           testName: item.title,
           status: item.status,
-          traceLogs: [],
-          selfHealingCount: 0,
+          traceLogs: item.error ? [item.error] : [],
+          selfHealingCount: item.status === 'healed' ? 1 : 0,
         })),
       };
 
