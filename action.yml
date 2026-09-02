@@ -9,7 +9,7 @@ inputs:
   shorky-cloud-url:
     description: 'The URL of your shorky-cloud instance'
     required: false
-    default: 'https://shorky-cloud.vercel.app'
+    default: 'https://shorky-cloud.vercel.app/api/v1/telemetry'
   shorky-cloud-api-key:
     description: 'API key for authenticating with shorky-cloud'
     required: false
