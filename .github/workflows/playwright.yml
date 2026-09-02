@@ -10,6 +10,10 @@ jobs:
   test:
     timeout-minutes: 15
     runs-on: ubuntu-latest
+    env:
+      SHORKY_CLOUD_URL: ${{ vars.SHORKY_CLOUD_URL || 'https://shorky-cloud.vercel.app/api/v1/telemetry' }}
+      SHORKY_CLOUD_API_KEY: ${{ secrets.SHORKY_CLOUD_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
     steps:
       - name: Checkout repository
@@ -29,22 +33,16 @@ jobs:
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps chrome
 
-      # 1. Run Playwright tests
+      # 1. Run Playwright tests (relies on playwright.config.ts for reporters)
       - name: Run Shorky Playwright Tests
-        env:
-          PLAYWRIGHT_JSON_OUTPUT_NAME: "test-results/report.json"
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           mkdir -p test-results
-          npx playwright test --project="Google Chrome" --reporter=json,list
+          npx playwright test --project="Google Chrome"
 
-      # 2. Dispatch failure telemetry to shorky-cloud
-      - name: Run Shorky Cloud Telemetry
+      # 2. Dispatch failure telemetry / auto-heal logic via local action
+      - name: Run Shorky Cloud Telemetry & Auto-Healer
         if: failure() && github.event_name == 'push'
         uses: ./
         with:
-          shorky-cloud-url: ${{ vars.SHORKY_CLOUD_URL }}
-          shorky-cloud-api-key: ${{ secrets.SHORKY_CLOUD_API_KEY }}
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           report-path: "test-results/report.json"
