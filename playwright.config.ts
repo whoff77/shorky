@@ -8,7 +8,8 @@ dotenv.config({ path: path.resolve(__dirname, '.env') });
 
 const reporters: any[] = [
   ['list'],
-  ['html', { open: 'never' }]
+  ['html', { open: 'never' }],
+  ['json', { outputFile: 'test-results/report.json' }]
 ];
 
 // Only add Shorky Cloud reporter if explicitly enabled or URL is provided
