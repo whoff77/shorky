@@ -11,6 +11,7 @@ const traceParser_1 = require("../engine/traceParser");
 const codeFixer_1 = require("../engine/codeFixer");
 const shorkyCloud_1 = require("../config/shorkyCloud");
 const githubPr_1 = require("../utils/githubPr");
+const generator_1 = require("../agent/generator");
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
 /**
@@ -86,21 +87,11 @@ function collectFailedSpecsFromReport(report) {
                     if (traceAttachment)
                         break;
                 }
-                // spec.file may already be relative (as emitted by the Playwright
-                // JSON reporter for most configs) or absolute (e.g. when the report
-                // is generated from a different working directory). Only apply
-                // path.relative() when we actually have an absolute path so we
-                // don't mangle an already-correct relative path.
-                let relativeSpecPath = '';
-                if (spec.file) {
-                    relativeSpecPath = path_1.default.isAbsolute(spec.file)
-                        ? path_1.default.relative(process.cwd(), spec.file)
-                        : spec.file;
-                }
-                if (relativeSpecPath && !relativeSpecPath.startsWith('tests/') && !relativeSpecPath.startsWith('tests' + path_1.default.sep)) {
-                    relativeSpecPath = path_1.default.join('tests', relativeSpecPath);
-                }
-                const resolvedSpecPath = relativeSpecPath || spec.file || 'unknown-spec';
+                // Map the raw report entry back to the exact original source test
+                // file path on disk (see resolveSpecSourcePath in traceParser.ts),
+                // so the in-place healing overwrite always targets the same file
+                // Playwright actually ran and failed.
+                const resolvedSpecPath = (0, traceParser_1.resolveSpecSourcePath)(spec.file) || spec.file || 'unknown-spec';
                 // Deduplicate by specPath: keep the first failure recorded for a
                 // given spec file so we never re-process (and re-fix) the same file
                 // multiple times in a single report.
@@ -138,6 +129,11 @@ async function runReportFix({ reportPath }) {
         return;
     }
     console.log(`🎯 Found ${failures.length} failed test(s) in report.`);
+    // Every fix generated during this run is staged (committed) onto the
+    // same shared healing branch (batchMode: true below) rather than each
+    // opening its own branch/PR. Once all failures have been processed, a
+    // single consolidated pull request is pushed containing every fix.
+    const healedFixes = [];
     for (const failure of failures) {
         console.log(`\n🎯 Target Spec: ${failure.specPath}`);
         console.log(`📦 Trace Zip: ${failure.traceZipPath || 'N/A'}`);
@@ -153,7 +149,14 @@ async function runReportFix({ reportPath }) {
         const resolvedSpecFsPath = path_1.default.resolve(failure.specPath);
         if (resolvedTraceZipPath && fs_1.default.existsSync(resolvedTraceZipPath) && fs_1.default.existsSync(resolvedSpecFsPath)) {
             try {
-                await runOfflineFix({ tracePath: resolvedTraceZipPath, specPath: failure.specPath });
+                const healedFix = await runOfflineFix({
+                    tracePath: resolvedTraceZipPath,
+                    specPath: failure.specPath,
+                    batchMode: true,
+                });
+                if (healedFix) {
+                    healedFixes.push(healedFix);
+                }
             }
             catch (err) {
                 console.error(`❌ Error running fixTrace for ${failure.specPath}:`, err instanceof Error ? err.message : err);
@@ -170,17 +173,30 @@ async function runReportFix({ reportPath }) {
             console.warn(`⚠️ Skipping offline fix for ${failure.specPath} — missing on disk: ${missing.join(', ')}.`);
         }
     }
+    if (healedFixes.length === 0) {
+        console.log('ℹ️ No fixes were successfully generated. Skipping pull request creation.');
+        return;
+    }
+    console.log(`\n📦 Pushing consolidated healing branch with ${healedFixes.length} fix(es)...`);
+    const prUrl = await (0, githubPr_1.pushConsolidatedHealingBranch)(healedFixes);
+    if (!prUrl) {
+        console.warn(`⚠️ No pull request was opened for ${healedFixes.length} healed spec(s). Ensure GITHUB_TOKEN and GITHUB_REPOSITORY are set, and that the workflow grants "contents: write" and "pull-requests: write" permissions.`);
+    }
 }
-async function runOfflineFix({ tracePath, specPath }) {
+async function runOfflineFix({ tracePath, specPath, batchMode = false }) {
     const absoluteTracePath = path_1.default.resolve(tracePath);
     const absoluteSpecPath = path_1.default.resolve(specPath);
     if (!fs_1.default.existsSync(absoluteTracePath)) {
         console.error(`❌ Trace file not found: ${absoluteTracePath}`);
-        process.exit(1);
+        if (!batchMode)
+            process.exit(1);
+        return null;
     }
     if (!fs_1.default.existsSync(absoluteSpecPath)) {
         console.error(`❌ Spec file not found: ${absoluteSpecPath}`);
-        process.exit(1);
+        if (!batchMode)
+            process.exit(1);
+        return null;
     }
     console.log(`🔍 Unpacking and analyzing trace: ${tracePath}...`);
     const failureContext = await (0, traceParser_1.parsePlaywrightTrace)(absoluteTracePath);
@@ -200,37 +216,48 @@ async function runOfflineFix({ tracePath, specPath }) {
     console.log(`📝 Explanation: ${fixResult.explanation}`);
     console.log(`\n--- Code Diff Preview ---`);
     console.log(fixResult.fixedCode);
-    const cleaned = sanitizeGeneratedCode(fixResult.fixedCode);
-    // Guardrail: Prevent wiping out test code with empty or truncated outputs
-    if (!cleaned || cleaned.length < 30 || !cleaned.includes('test(')) {
-        console.error(`❌ Error: LLM generated invalid or empty spec code for ${specPath}. Aborting file write to protect test file.`);
-        return;
+    // Code synthesis step: overwrite the *original* broken spec file in-place
+    // (rather than writing to a new, unreferenced file) so that CI on the
+    // healing branch actually re-runs and passes the very same spec file
+    // Playwright discovered and failed on.
+    const overwriteResult = (0, generator_1.overwriteSpecInPlace)({
+        specPath: absoluteSpecPath,
+        rawFixedCode: fixResult.fixedCode,
+    });
+    if (!overwriteResult.written) {
+        console.error(`❌ Error: ${overwriteResult.reason}`);
+        return null;
     }
-    fs_1.default.writeFileSync(absoluteSpecPath, cleaned, 'utf-8');
     console.log(`\n🎉 Successfully patched: ${specPath}`);
-    // Commit the fix on a new branch, push it, and open a pull request via
-    // the GitHub REST API using GITHUB_TOKEN. This is what actually surfaces
-    // the healed test as a reviewable PR in the consumer repository — the
-    // shorky-cloud webhook below is purely optional telemetry/dashboard
-    // notification and does not create the PR itself.
-    const prUrl = await (0, githubPr_1.openHealingPullRequest)({
+    const healedFix = {
         specPath,
         explanation: fixResult.explanation,
         errorLog: failureContext.errorMessage,
-    });
-    if (!prUrl) {
-        console.warn(`⚠️ No pull request was opened for ${specPath}. Ensure GITHUB_TOKEN and GITHUB_REPOSITORY are set, and that the workflow grants "contents: write" and "pull-requests: write" permissions.`);
+    };
+    if (batchMode) {
+        // Stage this fix's commit onto the shared consolidated healing branch;
+        // the caller (runReportFix) is responsible for pushing once after all
+        // fixes in the run have been staged, so multiple failures land in a
+        // single pull request instead of one PR per failing spec.
+        try {
+            (0, githubPr_1.stageHealingFix)(healedFix);
+            console.log(`🌿 Staged fix for ${specPath} on the consolidated healing branch.`);
+        }
+        catch (err) {
+            console.warn(`⚠️ Failed to stage the auto-healing fix for ${specPath}:`, err.message || err);
+        }
+    }
+    else {
+        // Standalone invocation (--trace/--spec): commit, push, and open the
+        // pull request immediately for this single fix.
+        const prUrl = await (0, githubPr_1.openHealingPullRequest)(healedFix);
+        if (!prUrl) {
+            console.warn(`⚠️ No pull request was opened for ${specPath}. Ensure GITHUB_TOKEN and GITHUB_REPOSITORY are set, and that the workflow grants "contents: write" and "pull-requests: write" permissions.`);
+        }
     }
     // Single unified webhook dispatch containing the genuine fix payload
-    await notifyShorkyCloud(specPath, { fixedCode: cleaned, explanation: fixResult.explanation }, absoluteTracePath, failureContext.errorMessage);
-}
-function sanitizeGeneratedCode(rawCode) {
-    return rawCode
-        .replace(/^```[a-z]*\n?/i, '')
-        .replace(/\n?```$/i, '')
-        .replace(/^\/\/\s*[^\n]*\.spec\.[tj]s\n?/i, '')
-        .replace(/\r\n/g, '\n')
-        .trim() + '\n';
+    await notifyShorkyCloud(specPath, { fixedCode: overwriteResult.cleanedCode, explanation: fixResult.explanation }, absoluteTracePath, failureContext.errorMessage);
+    return healedFix;
 }
 if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('src/cli/fixTrace.ts')) {
     const args = process.argv.slice(2);

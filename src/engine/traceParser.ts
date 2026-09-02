@@ -84,6 +84,43 @@ export function extractSpecPathFromTrace(traceZipPath: string, testDir = 'tests'
   return null;
 }
 
+/**
+ * Maps a raw `spec.file` value from a Playwright JSON report entry back to
+ * the exact original source test file path on disk, so downstream healing
+ * logic (fixTrace.ts) always overwrites the *same* file that Playwright
+ * actually ran and failed — never a differently-named or unreferenced file.
+ *
+ * Handles both of the shapes the JSON reporter can emit:
+ *  - an absolute path (resolved relative to `process.cwd()`)
+ *  - an already-relative path (used as-is)
+ *
+ * and normalizes it so it is rooted at `testDir` (default "tests"), matching
+ * how Playwright's `testDir` config option lays out spec files, without
+ * double-prefixing paths that already include it.
+ */
+export function resolveSpecSourcePath(rawSpecFile: string | undefined, testDir = 'tests'): string {
+  if (!rawSpecFile) return '';
+
+  let relativeSpecPath = path.isAbsolute(rawSpecFile)
+    ? path.relative(process.cwd(), rawSpecFile)
+    : rawSpecFile;
+
+  const normalizedTestDir = testDir.replace(/[\\/]+$/, '');
+  const testDirPrefix = normalizedTestDir + path.sep;
+  const testDirPrefixPosix = normalizedTestDir + '/';
+
+  if (
+    relativeSpecPath &&
+    !relativeSpecPath.startsWith(testDirPrefix) &&
+    !relativeSpecPath.startsWith(testDirPrefixPosix) &&
+    relativeSpecPath !== normalizedTestDir
+  ) {
+    relativeSpecPath = path.join(normalizedTestDir, relativeSpecPath);
+  }
+
+  return relativeSpecPath || rawSpecFile;
+}
+
 export async function parsePlaywrightTrace(traceZipPath: string): Promise<TraceFailureContext> {
   const extractDir = path.join(process.cwd(), '.shorky-temp-trace');
 

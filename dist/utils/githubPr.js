@@ -3,10 +3,15 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.HEALING_BRANCH_NAME = void 0;
+exports.stageHealingFix = stageHealingFix;
+exports.pushConsolidatedHealingBranch = pushConsolidatedHealingBranch;
 exports.openHealingPullRequest = openHealingPullRequest;
 // src/utils/githubPr.ts
 const child_process_1 = require("child_process");
 const path_1 = __importDefault(require("path"));
+/** The fixed name for the single consolidated healing branch/PR used across a run. */
+exports.HEALING_BRANCH_NAME = 'shorky/auto-heal-fixes';
 /**
  * Resolves the "owner/repo" slug that the GitHub REST API expects, from the
  * standard GITHUB_REPOSITORY env var GitHub Actions always sets.
@@ -29,15 +34,6 @@ function resolveBaseBranch() {
     }
     return process.env.GITHUB_REF_NAME || process.env.BRANCH || 'main';
 }
-/** Slugifies a spec path into something safe to embed in a git branch name. */
-function slugifySpecPath(specPath) {
-    return specPath
-        .replace(/^\/+/, '')
-        .replace(/\.(spec|test)\.[tj]sx?$/i, '')
-        .replace(/[^a-zA-Z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .toLowerCase();
-}
 /** Runs a git command in `cwd`, throwing with readable output on failure. */
 function git(args, cwd) {
     try {
@@ -50,58 +46,122 @@ function git(args, cwd) {
         throw new Error(`git ${args.join(' ')} failed: ${stderr}`);
     }
 }
+/** Returns true if an open pull request already exists for `head` -> `base`. */
+async function findExistingOpenPr(owner, repo, headBranch, baseBranch, githubToken) {
+    try {
+        const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls?state=open&head=${owner}:${headBranch}&base=${baseBranch}`, {
+            headers: {
+                Authorization: `Bearer ${githubToken}`,
+                Accept: 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+            },
+        });
+        if (!response.ok)
+            return null;
+        const prs = await response.json();
+        return Array.isArray(prs) && prs.length > 0 ? prs[0].html_url : null;
+    }
+    catch {
+        return null;
+    }
+}
+/** Builds the aggregated PR body describing every healed fix in this run. */
+function buildPrBody(fixes, repoRoot) {
+    const sections = fixes.map((fix) => {
+        const relativeSpecPath = path_1.default.isAbsolute(fix.specPath) ? path_1.default.relative(repoRoot, fix.specPath) : fix.specPath;
+        return [
+            `### \`${relativeSpecPath}\``,
+            '',
+            fix.explanation || '_No explanation provided by the LLM._',
+            fix.errorLog ? `\n**Original failure:**\n\`\`\`\n${fix.errorLog}\n\`\`\`` : '',
+        ]
+            .filter(Boolean)
+            .join('\n');
+    });
+    return [
+        `🤖 **Shorky** automatically detected ${fixes.length} failing test(s) and generated fixes for all of them.`,
+        '',
+        ...sections,
+        '',
+        '_This pull request was opened automatically by the Shorky auto-healing pipeline. Please review the diff before merging._',
+    ].join('\n');
+}
 /**
- * Commits the already-written spec fix on a new branch, pushes it using the
- * checked-out GITHUB_TOKEN credentials, and opens a pull request against the
- * base branch via the GitHub REST API.
+ * Stages one healed spec fix onto the shared consolidated healing branch.
+ * Creates the branch (off the base branch) on first use within a process,
+ * or reuses/checks-out the existing local branch on subsequent calls so
+ * that multiple fixes from the same run land as a single commit history on
+ * one branch rather than one branch/commit per spec.
+ *
+ * This only stages + commits locally; call `pushConsolidatedHealingBranch`
+ * once after all fixes have been staged to push and open (or update) the
+ * single pull request.
+ */
+function stageHealingFix(fix) {
+    const repoRoot = process.cwd();
+    const baseBranch = resolveBaseBranch();
+    const relativeSpecPath = path_1.default.isAbsolute(fix.specPath) ? path_1.default.relative(repoRoot, fix.specPath) : fix.specPath;
+    git(['config', 'user.name', 'shorky-bot'], repoRoot);
+    git(['config', 'user.email', 'shorky-bot@users.noreply.github.com'], repoRoot);
+    // Create the shared branch off the base branch the first time it's
+    // needed in this process; reuse it (already checked out) afterward.
+    const currentBranch = git(['rev-parse', '--abbrev-ref', 'HEAD'], repoRoot);
+    if (currentBranch !== exports.HEALING_BRANCH_NAME) {
+        try {
+            git(['checkout', '-b', exports.HEALING_BRANCH_NAME], repoRoot);
+        }
+        catch {
+            // Branch may already exist locally from a previous fix in this run.
+            git(['checkout', exports.HEALING_BRANCH_NAME], repoRoot);
+        }
+    }
+    git(['add', relativeSpecPath], repoRoot);
+    const commitMessage = `fix(auto-heal): repair ${relativeSpecPath}\n\n${fix.explanation}`;
+    git(['commit', '-m', commitMessage], repoRoot);
+}
+/**
+ * Pushes the consolidated healing branch (containing every commit staged
+ * via `stageHealingFix`) and opens a single pull request against the base
+ * branch via the GitHub REST API, aggregating all fixes into one PR body.
+ * If a PR already exists for this branch, the push simply updates it
+ * instead of creating a duplicate.
  *
  * Returns the PR URL on success, or null if the PR could not be created
- * (missing token/repo context, or the operation failed) — failures here are
- * logged but never thrown, so a missing PR-creation capability never crashes
- * the rest of the healing pipeline.
+ * (missing token/repo context, no fixes staged, or the operation failed) —
+ * failures here are logged but never thrown, so a missing PR-creation
+ * capability never crashes the rest of the healing pipeline.
  */
-async function openHealingPullRequest(options) {
-    const { specPath, explanation, errorLog } = options;
+async function pushConsolidatedHealingBranch(fixes) {
+    if (fixes.length === 0) {
+        console.log('ℹ️ No healed fixes were staged. Skipping pull request creation.');
+        return null;
+    }
     const githubToken = process.env.GITHUB_TOKEN;
     if (!githubToken) {
-        console.warn('⚠️ GITHUB_TOKEN is not set. Skipping automatic PR creation for the healed spec.');
+        console.warn('⚠️ GITHUB_TOKEN is not set. Skipping automatic PR creation for the healed specs.');
         return null;
     }
     const ownerRepo = resolveOwnerAndRepo();
     if (!ownerRepo) {
-        console.warn('⚠️ GITHUB_REPOSITORY is not set. Skipping automatic PR creation for the healed spec.');
+        console.warn('⚠️ GITHUB_REPOSITORY is not set. Skipping automatic PR creation for the healed specs.');
         return null;
     }
     const { owner, repo } = ownerRepo;
     const repoRoot = process.cwd();
     const baseBranch = resolveBaseBranch();
-    const relativeSpecPath = path_1.default.isAbsolute(specPath) ? path_1.default.relative(repoRoot, specPath) : specPath;
-    const branchName = `shorky/auto-heal-${slugifySpecPath(relativeSpecPath)}-${Date.now()}`;
     try {
-        console.log(`🌿 Creating healing branch "${branchName}" off "${baseBranch}"...`);
-        // Identify the commit author as a bot so it's clear this was automated.
-        git(['config', 'user.name', 'shorky-bot'], repoRoot);
-        git(['config', 'user.email', 'shorky-bot@users.noreply.github.com'], repoRoot);
-        git(['checkout', '-b', branchName], repoRoot);
-        git(['add', relativeSpecPath], repoRoot);
-        const commitMessage = `fix(auto-heal): repair ${relativeSpecPath}\n\n${explanation}`;
-        git(['commit', '-m', commitMessage], repoRoot);
-        console.log(`🚀 Pushing branch "${branchName}" to origin...`);
-        git(['push', '--set-upstream', 'origin', branchName], repoRoot);
-        console.log(`📬 Opening pull request via GitHub REST API (${owner}/${repo})...`);
-        const prBody = [
-            `🤖 **Shorky** automatically detected a failing test and generated a fix.`,
-            '',
-            `**Patched file:** \`${relativeSpecPath}\``,
-            '',
-            `**Explanation:**`,
-            explanation || '_No explanation provided by the LLM._',
-            errorLog ? `\n**Original failure:**\n\`\`\`\n${errorLog}\n\`\`\`` : '',
-            '',
-            '_This pull request was opened automatically by the Shorky auto-healing pipeline. Please review the diff before merging._',
-        ]
-            .filter(Boolean)
-            .join('\n');
+        console.log(`🚀 Pushing consolidated healing branch "${exports.HEALING_BRANCH_NAME}" (${fixes.length} fix(es)) to origin...`);
+        git(['push', '--force-with-lease', '--set-upstream', 'origin', exports.HEALING_BRANCH_NAME], repoRoot);
+        const existingPrUrl = await findExistingOpenPr(owner, repo, exports.HEALING_BRANCH_NAME, baseBranch, githubToken);
+        if (existingPrUrl) {
+            console.log(`🎉 Updated existing consolidated pull request: ${existingPrUrl}`);
+            return existingPrUrl;
+        }
+        console.log(`📬 Opening consolidated pull request via GitHub REST API (${owner}/${repo})...`);
+        const prBody = buildPrBody(fixes, repoRoot);
+        const title = fixes.length === 1
+            ? `fix(auto-heal): repair ${path_1.default.isAbsolute(fixes[0].specPath) ? path_1.default.relative(repoRoot, fixes[0].specPath) : fixes[0].specPath}`
+            : `fix(auto-heal): repair ${fixes.length} failing tests`;
         const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/pulls`, {
             method: 'POST',
             headers: {
@@ -111,8 +171,8 @@ async function openHealingPullRequest(options) {
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                title: `fix(auto-heal): repair ${relativeSpecPath}`,
-                head: branchName,
+                title,
+                head: exports.HEALING_BRANCH_NAME,
                 base: baseBranch,
                 body: prBody,
             }),
@@ -127,7 +187,7 @@ async function openHealingPullRequest(options) {
         return pr.html_url;
     }
     catch (err) {
-        console.warn('⚠️ Failed to create the auto-healing pull request:', err.message || err);
+        console.warn('⚠️ Failed to create the consolidated auto-healing pull request:', err.message || err);
         return null;
     }
     finally {
@@ -140,4 +200,19 @@ async function openHealingPullRequest(options) {
             // Ignore — nothing else in the job depends on the branch we end up on.
         }
     }
+}
+/**
+ * Convenience single-fix wrapper preserved for backward compatibility with
+ * callers that only ever heal one spec at a time: stages the fix and
+ * immediately pushes/opens the (single-entry) consolidated pull request.
+ */
+async function openHealingPullRequest(fix) {
+    try {
+        stageHealingFix(fix);
+    }
+    catch (err) {
+        console.warn('⚠️ Failed to stage the auto-healing fix:', err.message || err);
+        return null;
+    }
+    return pushConsolidatedHealingBranch([fix]);
 }
