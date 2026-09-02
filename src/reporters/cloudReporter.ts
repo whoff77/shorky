@@ -83,9 +83,17 @@ export default class ShorkyCloudReporter implements Reporter {
         tests: this.testItems.map((item) => ({
           testName: item.title,
           status: item.status,
-          traceLogs: item.error ? [item.error] : [],
+          traceLogs: item.error 
+            ? [{
+                step: 1,
+                action: 'test_execution',
+                status: item.status === 'failed' ? 'failed' : 'success',
+                timestamp: new Date().toISOString(),
+                message: item.error,
+              }]
+            : [],
           selfHealingCount: item.status === 'healed' ? 1 : 0,
-        })),
+        }))
       };
 
       const response = await fetch(cloudUrl, {
