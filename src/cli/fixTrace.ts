@@ -64,56 +64,45 @@ async function notifyShorkyCloud(
 }
 
 /**
- * Sends a single, consolidated shorky-cloud webhook notification summarizing
- * every fix produced during a batch `runReportFix()` run, along with the
- * one consolidated pull request URL. This replaces N individual per-spec
- * webhook dispatches with exactly one call per batch run, sharing the same
- * suite-wide `runId` used to group the fixes under one run card.
+ * Notifies shorky-cloud of every fix produced during a batch `runReportFix()`
+ * run, sharing the same suite-wide `runId` so every dispatch is grouped
+ * under a single run card on the dashboard.
+ *
+ * shorky-cloud's `/api/webhook` endpoint validates the request body against
+ * a *flat* Zod schema requiring non-empty top-level `specPath`, `fixedCode`,
+ * and `explanation` strings — it has no concept of a batched/nested
+ * `fixes: [...]` array. Sending one combined request with a nested array
+ * (and no top-level `specPath`/`fixedCode`/`explanation`) fails Zod
+ * validation with a 400 "Invalid payload" error on every batch run.
+ *
+ * To stay compatible with that schema while still avoiding a fresh/duplicate
+ * PR per spec, this dispatches one flat, schema-shaped webhook request per
+ * healed code fix — reusing the exact same payload shape as
+ * `notifyShorkyCloud()` — but all sharing `runId` so shorky-cloud attaches
+ * every trace to the same test run rather than creating N separate runs.
+ * Visual-regression handoff entries have no generated code (`fixedCode` is
+ * required/non-empty by the schema) and are intentionally skipped here;
+ * they're already fully represented in the consolidated PR body.
  */
 async function notifyShorkyCloudBatch(
   fixes: HealedFixEntry[],
-  prUrl: string | null,
   runId: string
 ) {
-  if (fixes.length === 0) return;
+  const notifiable = fixes.filter((fix) => !fix.isVisualRegression && !!fix.fixedCode && !!fix.specPath);
 
-  const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/');
-  const payload = {
-    repoOwner,
-    repoName,
-    branch: process.env.GITHUB_REF_NAME || process.env.BRANCH || 'main',
-    runId,
-    prUrl: prUrl || undefined,
-    fixes: fixes.map((fix) => ({
-      specPath: fix.specPath.replace(/^\/+/, ''),
-      traceZipPath: fix.traceZipPath || null,
-      errorLog: fix.errorLog || null,
-      fixedCode: fix.fixedCode || null,
-      explanation: fix.explanation,
-      isVisualRegression: !!fix.isVisualRegression,
-    })),
-  };
+  if (notifiable.length === 0) {
+    console.log('ℹ️ No code-fix entries with fixedCode to report to shorky-cloud for this batch.');
+    return;
+  }
 
-  const webhookUrl = getShorkyCloudWebhookUrl(process.env.SHORKY_CLOUD_URL);
-  try {
-    const res = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-shorky-api-key': getShorkyCloudApiKey(),
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!res.ok) {
-      const errorData = await res.json().catch(() => ({}));
-      console.warn(`⚠️ shorky-cloud batch webhook responded with status ${res.status}:`, JSON.stringify(errorData));
-    } else {
-      const data = await res.json();
-      console.log(`🎉 Batch webhook dispatched successfully for ${fixes.length} fix(es): ${data.prUrl || data.message || 'OK'}`);
-    }
-  } catch (err: any) {
-    console.warn(`⚠️ Failed to trigger shorky-cloud batch webhook:`, err.message || err);
+  for (const fix of notifiable) {
+    await notifyShorkyCloud(
+      fix.specPath,
+      { fixedCode: fix.fixedCode as string, explanation: fix.explanation },
+      fix.traceZipPath,
+      fix.errorLog,
+      runId
+    );
   }
 }
 
@@ -391,11 +380,13 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
     );
   }
 
-  // Dispatch a single consolidated shorky-cloud webhook for the whole batch
-  // run — individual per-spec webhooks were intentionally skipped above in
-  // runOfflineFix()'s batchMode branch to avoid firing one webhook (and
-  // registering one "run") per failed spec in the report.
-  await notifyShorkyCloudBatch(healedFixes, prUrl, suiteRunId);
+  // Notify shorky-cloud of every code fix in this batch. Each dispatch uses
+  // the schema-required flat { specPath, fixedCode, explanation } shape (see
+  // notifyShorkyCloudBatch's doc comment for why a single nested payload
+  // isn't viable against shorky-cloud's current Zod schema), but all share
+  // the same suiteRunId so they're grouped under a single run card rather
+  // than registering a separate run per spec.
+  await notifyShorkyCloudBatch(healedFixes, suiteRunId);
 }
 
 export interface RunOfflineFixOptions {
