@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build output
+dist/
+
+# Playwright test artifacts / reports
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+playwright/.auth/
+
+# Generated Shorky specs & trace logs (agent output, not hand-authored)
+tests/generated-*.spec.ts
+tests/generated-*.trace.json
+*.trace.json
+
+# Visual regression snapshots (binary, not useful as text context)
+tests/__snapshots__/
+tests/**/*-snapshots/
+
+# Live selector-healing cache (mutated at runtime, not source of truth)
+src/fixtures/healed-selectors.json
+
+# Environment & secrets
+.env
+.env.*
+
+# Editor/tooling metadata
+.git/
+
+# Misc
+*.log
+.DS_Store
