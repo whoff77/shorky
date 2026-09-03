@@ -25,6 +25,15 @@ export interface HealedFixEntry {
   isVisualRegression?: boolean;
   /** Populated only when isVisualRegression is true. */
   visualDiff?: VisualDiffArtifactPaths;
+  /**
+   * The LLM-generated fixed code for this spec, when available. Not used by
+   * the PR body — only carried along so a single consolidated shorky-cloud
+   * webhook can be dispatched for the whole batch run instead of one
+   * webhook per spec.
+   */
+  fixedCode?: string;
+  /** Absolute path to the trace.zip analyzed for this fix, for webhook telemetry. */
+  traceZipPath?: string;
 }
 
 /** @deprecated kept as an alias for HealedFixEntry for backward compatibility. */

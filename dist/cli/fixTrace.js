@@ -18,6 +18,11 @@ dotenv_1.default.config();
 /**
  * Sends the final repaired code and trace context to shorky-cloud,
  * ensuring it only triggers once per successful offline fix.
+ *
+ * Only used for the standalone (`--trace`/`--spec`) single-fix flow. Batch
+ * report runs (`runReportFix`) intentionally skip this per-spec dispatch —
+ * see `notifyShorkyCloudBatch` — so a single report with N failed specs
+ * only ever produces one webhook call, not N.
  */
 async function notifyShorkyCloud(specPath, fixResult, traceZipPath, errorLog, runId) {
     const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/');
@@ -54,6 +59,55 @@ async function notifyShorkyCloud(specPath, fixResult, traceZipPath, errorLog, ru
     }
     catch (err) {
         console.warn(`⚠️ Failed to trigger shorky-cloud webhook:`, err.message || err);
+    }
+}
+/**
+ * Sends a single, consolidated shorky-cloud webhook notification summarizing
+ * every fix produced during a batch `runReportFix()` run, along with the
+ * one consolidated pull request URL. This replaces N individual per-spec
+ * webhook dispatches with exactly one call per batch run, sharing the same
+ * suite-wide `runId` used to group the fixes under one run card.
+ */
+async function notifyShorkyCloudBatch(fixes, prUrl, runId) {
+    if (fixes.length === 0)
+        return;
+    const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/');
+    const payload = {
+        repoOwner,
+        repoName,
+        branch: process.env.GITHUB_REF_NAME || process.env.BRANCH || 'main',
+        runId,
+        prUrl: prUrl || undefined,
+        fixes: fixes.map((fix) => ({
+            specPath: fix.specPath.replace(/^\/+/, ''),
+            traceZipPath: fix.traceZipPath || null,
+            errorLog: fix.errorLog || null,
+            fixedCode: fix.fixedCode || null,
+            explanation: fix.explanation,
+            isVisualRegression: !!fix.isVisualRegression,
+        })),
+    };
+    const webhookUrl = (0, shorkyCloud_1.getShorkyCloudWebhookUrl)(process.env.SHORKY_CLOUD_URL);
+    try {
+        const res = await fetch(webhookUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-shorky-api-key': (0, shorkyCloud_1.getShorkyCloudApiKey)(),
+            },
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const errorData = await res.json().catch(() => ({}));
+            console.warn(`⚠️ shorky-cloud batch webhook responded with status ${res.status}:`, JSON.stringify(errorData));
+        }
+        else {
+            const data = await res.json();
+            console.log(`🎉 Batch webhook dispatched successfully for ${fixes.length} fix(es): ${data.prUrl || data.message || 'OK'}`);
+        }
+    }
+    catch (err) {
+        console.warn(`⚠️ Failed to trigger shorky-cloud batch webhook:`, err.message || err);
     }
 }
 /**
@@ -249,6 +303,11 @@ async function runReportFix({ reportPath }) {
     if (!prUrl) {
         console.warn(`⚠️ No pull request was opened for ${healedFixes.length} healed spec(s). Ensure GITHUB_TOKEN and GITHUB_REPOSITORY are set, and that the workflow grants "contents: write" and "pull-requests: write" permissions.`);
     }
+    // Dispatch a single consolidated shorky-cloud webhook for the whole batch
+    // run — individual per-spec webhooks were intentionally skipped above in
+    // runOfflineFix()'s batchMode branch to avoid firing one webhook (and
+    // registering one "run") per failed spec in the report.
+    await notifyShorkyCloudBatch(healedFixes, prUrl, suiteRunId);
 }
 async function runOfflineFix({ tracePath, specPath, batchMode = false, runId }) {
     const absoluteTracePath = path_1.default.resolve(tracePath);
@@ -321,8 +380,15 @@ async function runOfflineFix({ tracePath, specPath, batchMode = false, runId }) 
         specPath,
         explanation: fixResult.explanation,
         errorLog: failureContext.errorMessage,
+        fixedCode: overwriteResult.cleanedCode,
+        traceZipPath: absoluteTracePath,
     };
     if (batchMode) {
+        // Batch report mode: only stage the fix onto the shared consolidated
+        // healing branch. Individual PR creation and per-spec webhook dispatch
+        // are intentionally skipped here — `runReportFix` pushes exactly one
+        // consolidated branch/PR and fires exactly one consolidated webhook
+        // once every failure in the report has been processed.
         try {
             (0, githubPr_1.stageHealingFix)(healedFix);
             console.log(`🌿 Staged fix for ${specPath} on the consolidated healing branch.`);
@@ -336,9 +402,11 @@ async function runOfflineFix({ tracePath, specPath, batchMode = false, runId }) 
         if (!prUrl) {
             console.warn(`⚠️ No pull request was opened for ${specPath}. Ensure GITHUB_TOKEN and GITHUB_REPOSITORY are set, and that the workflow grants "contents: write" and "pull-requests: write" permissions.`);
         }
+        // Dispatch the per-spec webhook only for the standalone (non-batch)
+        // single-fix flow. Batch runs are notified once, in aggregate, from
+        // `runReportFix` after the consolidated PR is opened.
+        await notifyShorkyCloud(specPath, { fixedCode: overwriteResult.cleanedCode, explanation: fixResult.explanation }, absoluteTracePath, failureContext.errorMessage, effectiveRunId);
     }
-    // Dispatch webhook with the suite-wide or standalone runId
-    await notifyShorkyCloud(specPath, { fixedCode: overwriteResult.cleanedCode, explanation: fixResult.explanation }, absoluteTracePath, failureContext.errorMessage, effectiveRunId);
     return healedFix;
 }
 if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('src/cli/fixTrace.ts')) {
