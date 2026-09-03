@@ -7,6 +7,7 @@ exports.runReportFix = runReportFix;
 exports.runOfflineFix = runOfflineFix;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
+const crypto_1 = require("crypto");
 const traceParser_1 = require("../engine/traceParser");
 const codeFixer_1 = require("../engine/codeFixer");
 const shorkyCloud_1 = require("../config/shorkyCloud");
@@ -18,7 +19,7 @@ dotenv_1.default.config();
  * Sends the final repaired code and trace context to shorky-cloud,
  * ensuring it only triggers once per successful offline fix.
  */
-async function notifyShorkyCloud(specPath, fixResult, traceZipPath, errorLog) {
+async function notifyShorkyCloud(specPath, fixResult, traceZipPath, errorLog, runId) {
     const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/');
     const sanitizedSpecPath = specPath.replace(/^\/+/, '');
     const payload = {
@@ -30,6 +31,7 @@ async function notifyShorkyCloud(specPath, fixResult, traceZipPath, errorLog) {
         errorLog: errorLog || null,
         fixedCode: fixResult.fixedCode,
         explanation: fixResult.explanation,
+        runId: runId || undefined,
     };
     const webhookUrl = (0, shorkyCloud_1.getShorkyCloudWebhookUrl)(process.env.SHORKY_CLOUD_URL);
     try {
@@ -164,7 +166,9 @@ async function runReportFix({ reportPath }) {
         console.error(`❌ Report file not found: ${absoluteReportPath}`);
         process.exit(1);
     }
-    console.log(`🔍 Resolving failed specs and traces from Playwright JSON report: ${reportPath}...`);
+    // Generate a single suite-wide runId to group all healed traces under one run card
+    const suiteRunId = (0, crypto_1.randomUUID)();
+    console.log(`🔍 Resolving failed specs and traces from Playwright JSON report: ${reportPath} (Run ID: ${suiteRunId})...`);
     const report = JSON.parse(fs_1.default.readFileSync(absoluteReportPath, 'utf-8'));
     const failures = collectFailedSpecsFromReport(report);
     if (failures.length === 0) {
@@ -183,18 +187,6 @@ async function runReportFix({ reportPath }) {
         if (failure.errorLog) {
             console.log(`💥 Error: ${failure.errorLog}`);
         }
-        // Completely removed duplicate pre-telemetry ping (`dispatchFailureTelemetry`) 
-        // to stop the triplet job expansion. Only run the offline fix cycle.
-        // --- Visual Diff Handoff ---
-        // Shorky's ReAct agent only synthesizes DOM/action-level code (selector
-        // and interaction fixes) — it has no way to adjust pixelmatch
-        // thresholds, rewrite baseline snapshots, or otherwise resolve a
-        // genuine visual discrepancy. Previously, attempting an LLM code repair
-        // for these failures caused the agent to "fix" unrelated selectors,
-        // which never resolves the pixel mismatch and triggers a re-fail /
-        // re-heal loop. Instead, bypass code generation entirely for visual
-        // regressions and hand the diagnostic artifacts straight to the PR for
-        // human review.
         if (failure.isVisualRegression) {
             console.log(`🖼️ Detected a visual regression failure for ${failure.specPath}. Bypassing LLM code repair (Visual Diff Handoff).`);
             if (failure.visualDiff?.expectedPath)
@@ -219,9 +211,6 @@ async function runReportFix({ reportPath }) {
             healedFixes.push(visualHandoffFix);
             continue;
         }
-        // Playwright's JSON reporter emits absolute attachment paths by default,
-        // but resolve defensively (relative to cwd) in case a report was
-        // generated with relative paths or moved between machines.
         const resolvedTraceZipPath = failure.traceZipPath ? path_1.default.resolve(failure.traceZipPath) : undefined;
         const resolvedSpecFsPath = path_1.default.resolve(failure.specPath);
         if (resolvedTraceZipPath && fs_1.default.existsSync(resolvedTraceZipPath) && fs_1.default.existsSync(resolvedSpecFsPath)) {
@@ -230,6 +219,7 @@ async function runReportFix({ reportPath }) {
                     tracePath: resolvedTraceZipPath,
                     specPath: failure.specPath,
                     batchMode: true,
+                    runId: suiteRunId,
                 });
                 if (healedFix) {
                     healedFixes.push(healedFix);
@@ -260,9 +250,10 @@ async function runReportFix({ reportPath }) {
         console.warn(`⚠️ No pull request was opened for ${healedFixes.length} healed spec(s). Ensure GITHUB_TOKEN and GITHUB_REPOSITORY are set, and that the workflow grants "contents: write" and "pull-requests: write" permissions.`);
     }
 }
-async function runOfflineFix({ tracePath, specPath, batchMode = false }) {
+async function runOfflineFix({ tracePath, specPath, batchMode = false, runId }) {
     const absoluteTracePath = path_1.default.resolve(tracePath);
     const absoluteSpecPath = path_1.default.resolve(specPath);
+    const effectiveRunId = runId || (0, crypto_1.randomUUID)();
     if (!fs_1.default.existsSync(absoluteTracePath)) {
         console.error(`❌ Trace file not found: ${absoluteTracePath}`);
         if (!batchMode)
@@ -286,12 +277,6 @@ async function runOfflineFix({ tracePath, specPath, batchMode = false }) {
         console.log(`   - Selector: ${failureContext.failedSelector}`);
         console.log(`   - Error: ${failureContext.errorMessage}`);
     }
-    // --- Visual Diff Handoff ---
-    // See runReportFix() for the full rationale: Shorky's ReAct agent only
-    // synthesizes DOM/action-level code and cannot resolve genuine pixel
-    // discrepancies, so bypass the LLM code repair entirely for visual
-    // regression failures and hand the diagnostics off for human review
-    // instead of risking an invalid "fix" that re-fails and loops.
     if ((0, traceParser_1.isVisualRegressionFailure)(failureContext.errorMessage)) {
         console.log(`🖼️ Detected a visual regression failure for ${specPath}. Bypassing LLM code repair (Visual Diff Handoff).`);
         const visualHandoffFix = {
@@ -323,10 +308,6 @@ async function runOfflineFix({ tracePath, specPath, batchMode = false }) {
     console.log(`📝 Explanation: ${fixResult.explanation}`);
     console.log(`\n--- Code Diff Preview ---`);
     console.log(fixResult.fixedCode);
-    // Code synthesis step: overwrite the *original* broken spec file in-place
-    // (rather than writing to a new, unreferenced file) so that CI on the
-    // healing branch actually re-runs and passes the very same spec file
-    // Playwright discovered and failed on.
     const overwriteResult = (0, generator_1.overwriteSpecInPlace)({
         specPath: absoluteSpecPath,
         rawFixedCode: fixResult.fixedCode,
@@ -342,10 +323,6 @@ async function runOfflineFix({ tracePath, specPath, batchMode = false }) {
         errorLog: failureContext.errorMessage,
     };
     if (batchMode) {
-        // Stage this fix's commit onto the shared consolidated healing branch;
-        // the caller (runReportFix) is responsible for pushing once after all
-        // fixes in the run have been staged, so multiple failures land in a
-        // single pull request instead of one PR per failing spec.
         try {
             (0, githubPr_1.stageHealingFix)(healedFix);
             console.log(`🌿 Staged fix for ${specPath} on the consolidated healing branch.`);
@@ -355,15 +332,13 @@ async function runOfflineFix({ tracePath, specPath, batchMode = false }) {
         }
     }
     else {
-        // Standalone invocation (--trace/--spec): commit, push, and open the
-        // pull request immediately for this single fix.
         const prUrl = await (0, githubPr_1.openHealingPullRequest)(healedFix);
         if (!prUrl) {
             console.warn(`⚠️ No pull request was opened for ${specPath}. Ensure GITHUB_TOKEN and GITHUB_REPOSITORY are set, and that the workflow grants "contents: write" and "pull-requests: write" permissions.`);
         }
     }
-    // Single unified webhook dispatch containing the genuine fix payload
-    await notifyShorkyCloud(specPath, { fixedCode: overwriteResult.cleanedCode, explanation: fixResult.explanation }, absoluteTracePath, failureContext.errorMessage);
+    // Dispatch webhook with the suite-wide or standalone runId
+    await notifyShorkyCloud(specPath, { fixedCode: overwriteResult.cleanedCode, explanation: fixResult.explanation }, absoluteTracePath, failureContext.errorMessage, effectiveRunId);
     return healedFix;
 }
 if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('src/cli/fixTrace.ts')) {

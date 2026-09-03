@@ -33,9 +33,11 @@ class ShorkyCloudReporter {
             this.runData.failed++;
             testStatus = 'failed';
         }
+        const errorMessage = result.error?.message || result.error?.stack;
         this.testItems.push({
             title: test.title,
             status: testStatus,
+            error: errorMessage,
         });
     }
     async onEnd(result) {
@@ -60,9 +62,17 @@ class ShorkyCloudReporter {
                 tests: this.testItems.map((item) => ({
                     testName: item.title,
                     status: item.status,
-                    traceLogs: [],
-                    selfHealingCount: 0,
-                })),
+                    traceLogs: item.error
+                        ? [{
+                                step: 1,
+                                action: 'test_execution',
+                                status: item.status === 'failed' ? 'failed' : 'success',
+                                timestamp: new Date().toISOString(),
+                                message: item.error,
+                            }]
+                        : [],
+                    selfHealingCount: item.status === 'healed' ? 1 : 0,
+                }))
             };
             const response = await fetch(cloudUrl, {
                 method: 'POST',

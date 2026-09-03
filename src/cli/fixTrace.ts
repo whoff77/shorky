@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { parsePlaywrightTrace, resolveSpecSourcePath, isVisualRegressionFailure } from '../engine/traceParser';
 import { generateSpecFix, FixResult } from '../engine/codeFixer';
 import { getShorkyCloudApiKey, getShorkyCloudWebhookUrl } from '../config/shorkyCloud';
@@ -17,7 +18,8 @@ async function notifyShorkyCloud(
   specPath: string, 
   fixResult: { fixedCode: string; explanation: string }, 
   traceZipPath?: string | null,
-  errorLog?: string | null
+  errorLog?: string | null,
+  runId?: string
 ) {
   const [repoOwner, repoName] = (process.env.GITHUB_REPOSITORY || 'owner/repo').split('/');
   const sanitizedSpecPath = specPath.replace(/^\/+/, '');
@@ -30,6 +32,7 @@ async function notifyShorkyCloud(
     errorLog: errorLog || null,
     fixedCode: fixResult.fixedCode,
     explanation: fixResult.explanation,
+    runId: runId || undefined,
   };
 
   const webhookUrl = getShorkyCloudWebhookUrl(process.env.SHORKY_CLOUD_URL);
@@ -235,7 +238,10 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
     process.exit(1);
   }
 
-  console.log(`🔍 Resolving failed specs and traces from Playwright JSON report: ${reportPath}...`);
+  // Generate a single suite-wide runId to group all healed traces under one run card
+  const suiteRunId = randomUUID();
+  console.log(`🔍 Resolving failed specs and traces from Playwright JSON report: ${reportPath} (Run ID: ${suiteRunId})...`);
+
   const report: PlaywrightJsonReport = JSON.parse(fs.readFileSync(absoluteReportPath, 'utf-8'));
   const failures = collectFailedSpecsFromReport(report);
 
@@ -259,19 +265,6 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
       console.log(`💥 Error: ${failure.errorLog}`);
     }
 
-    // Completely removed duplicate pre-telemetry ping (`dispatchFailureTelemetry`) 
-    // to stop the triplet job expansion. Only run the offline fix cycle.
-
-    // --- Visual Diff Handoff ---
-    // Shorky's ReAct agent only synthesizes DOM/action-level code (selector
-    // and interaction fixes) — it has no way to adjust pixelmatch
-    // thresholds, rewrite baseline snapshots, or otherwise resolve a
-    // genuine visual discrepancy. Previously, attempting an LLM code repair
-    // for these failures caused the agent to "fix" unrelated selectors,
-    // which never resolves the pixel mismatch and triggers a re-fail /
-    // re-heal loop. Instead, bypass code generation entirely for visual
-    // regressions and hand the diagnostic artifacts straight to the PR for
-    // human review.
     if (failure.isVisualRegression) {
       console.log(`🖼️ Detected a visual regression failure for ${failure.specPath}. Bypassing LLM code repair (Visual Diff Handoff).`);
       if (failure.visualDiff?.expectedPath) console.log(`   - Expected: ${failure.visualDiff.expectedPath}`);
@@ -296,9 +289,6 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
       continue;
     }
 
-    // Playwright's JSON reporter emits absolute attachment paths by default,
-    // but resolve defensively (relative to cwd) in case a report was
-    // generated with relative paths or moved between machines.
     const resolvedTraceZipPath = failure.traceZipPath ? path.resolve(failure.traceZipPath) : undefined;
     const resolvedSpecFsPath = path.resolve(failure.specPath);
 
@@ -308,6 +298,7 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
           tracePath: resolvedTraceZipPath,
           specPath: failure.specPath,
           batchMode: true,
+          runId: suiteRunId,
         });
         if (healedFix) {
           healedFixes.push(healedFix);
@@ -345,20 +336,14 @@ export async function runReportFix({ reportPath }: RunReportFixOptions) {
 export interface RunOfflineFixOptions {
   tracePath: string;
   specPath: string;
-  /**
-   * When true, the healed fix is staged onto the shared consolidated
-   * healing branch (via stageHealingFix) instead of immediately pushing
-   * its own branch and opening its own pull request. Used by
-   * runReportFix() to batch multiple fixes from the same run into a
-   * single PR. Defaults to false for backward-compatible standalone use
-   * (--trace/--spec CLI invocation).
-   */
   batchMode?: boolean;
+  runId?: string;
 }
 
-export async function runOfflineFix({ tracePath, specPath, batchMode = false }: RunOfflineFixOptions): Promise<HealedFixEntry | null> {
+export async function runOfflineFix({ tracePath, specPath, batchMode = false, runId }: RunOfflineFixOptions): Promise<HealedFixEntry | null> {
   const absoluteTracePath = path.resolve(tracePath);
   const absoluteSpecPath = path.resolve(specPath);
+  const effectiveRunId = runId || randomUUID();
 
   if (!fs.existsSync(absoluteTracePath)) {
     console.error(`❌ Trace file not found: ${absoluteTracePath}`);
@@ -384,12 +369,6 @@ export async function runOfflineFix({ tracePath, specPath, batchMode = false }: 
     console.log(`   - Error: ${failureContext.errorMessage}`);
   }
 
-  // --- Visual Diff Handoff ---
-  // See runReportFix() for the full rationale: Shorky's ReAct agent only
-  // synthesizes DOM/action-level code and cannot resolve genuine pixel
-  // discrepancies, so bypass the LLM code repair entirely for visual
-  // regression failures and hand the diagnostics off for human review
-  // instead of risking an invalid "fix" that re-fails and loops.
   if (isVisualRegressionFailure(failureContext.errorMessage)) {
     console.log(`🖼️ Detected a visual regression failure for ${specPath}. Bypassing LLM code repair (Visual Diff Handoff).`);
 
@@ -427,10 +406,6 @@ export async function runOfflineFix({ tracePath, specPath, batchMode = false }: 
   console.log(`\n--- Code Diff Preview ---`);
   console.log(fixResult.fixedCode);
 
-  // Code synthesis step: overwrite the *original* broken spec file in-place
-  // (rather than writing to a new, unreferenced file) so that CI on the
-  // healing branch actually re-runs and passes the very same spec file
-  // Playwright discovered and failed on.
   const overwriteResult = overwriteSpecInPlace({
     specPath: absoluteSpecPath,
     rawFixedCode: fixResult.fixedCode,
@@ -450,10 +425,6 @@ export async function runOfflineFix({ tracePath, specPath, batchMode = false }: 
   };
 
   if (batchMode) {
-    // Stage this fix's commit onto the shared consolidated healing branch;
-    // the caller (runReportFix) is responsible for pushing once after all
-    // fixes in the run have been staged, so multiple failures land in a
-    // single pull request instead of one PR per failing spec.
     try {
       stageHealingFix(healedFix);
       console.log(`🌿 Staged fix for ${specPath} on the consolidated healing branch.`);
@@ -461,8 +432,6 @@ export async function runOfflineFix({ tracePath, specPath, batchMode = false }: 
       console.warn(`⚠️ Failed to stage the auto-healing fix for ${specPath}:`, err.message || err);
     }
   } else {
-    // Standalone invocation (--trace/--spec): commit, push, and open the
-    // pull request immediately for this single fix.
     const prUrl = await openHealingPullRequest(healedFix);
     if (!prUrl) {
       console.warn(
@@ -471,12 +440,13 @@ export async function runOfflineFix({ tracePath, specPath, batchMode = false }: 
     }
   }
 
-  // Single unified webhook dispatch containing the genuine fix payload
+  // Dispatch webhook with the suite-wide or standalone runId
   await notifyShorkyCloud(
     specPath,
     { fixedCode: overwriteResult.cleanedCode, explanation: fixResult.explanation },
     absoluteTracePath,
-    failureContext.errorMessage
+    failureContext.errorMessage,
+    effectiveRunId
   );
 
   return healedFix;
