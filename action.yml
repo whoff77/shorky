@@ -43,6 +43,14 @@ runs:
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
         REPORT_PATH: ${{ inputs.report-path }}
+        # If the consuming project's Playwright globalSetup already minted a
+        # shared SHORKY_RUN_ID (see shorky-test-consumer's global-setup.ts)
+        # and exported it to $GITHUB_ENV, forward it here so fixTrace.ts
+        # reuses that exact ID instead of falling back to reading it from
+        # "<report-dir>/.shorky-run-id" or minting a new one. This keeps a
+        # multi-worker Playwright run's batch report, consolidated PR, and
+        # telemetry dispatch tagged with one single run identifier.
+        SHORKY_RUN_ID: ${{ env.SHORKY_RUN_ID }}
       run: |
         echo "🔍 Resolving failed specs and traces from Playwright JSON report..."
         npx tsx "${{ github.action_path }}/src/cli/fixTrace.ts" --report "$REPORT_PATH"
