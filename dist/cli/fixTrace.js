@@ -16,6 +16,21 @@ const generator_1 = require("../agent/generator");
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
 /**
+ * Hard runtime guard invoked immediately before every `openHealingPullRequest()`
+ * call site. Individual PR creation must NEVER happen while a batch report
+ * run is in progress — that's the exact root cause of duplicate individual
+ * PRs (e.g. #47, #48) appearing alongside the single consolidated PR.
+ * Throwing here (rather than merely logging) makes it structurally
+ * impossible for a future refactor to accidentally invoke
+ * `openHealingPullRequest()` from the batch path without an immediate,
+ * loud failure.
+ */
+function assertIndividualPrAllowed(specPath, batchMode) {
+    if (batchMode) {
+        throw new Error(`Invariant violation: attempted to call openHealingPullRequest() for "${specPath}" while batchMode=true. Individual PR creation is strictly forbidden during batch report runs — only the single consolidated pull request (via pushConsolidatedHealingBranch) may be created.`);
+    }
+}
+/**
  * Sends the final repaired code and trace context to shorky-cloud,
  * ensuring it only triggers once per successful offline fix.
  *
@@ -334,6 +349,15 @@ async function runReportFix({ reportPath }) {
 async function runOfflineFix({ tracePath, specPath, batchMode = false, runId }) {
     const absoluteTracePath = path_1.default.resolve(tracePath);
     const absoluteSpecPath = path_1.default.resolve(specPath);
+    // Hard invariant: in batch mode, the caller (runReportFix) MUST supply the
+    // shared suiteRunId explicitly. Silently falling through to a fresh
+    // randomUUID() here — even just once — would mint a unique run ID for
+    // this single fix, which is the exact root cause of split Neon run
+    // records across a single batch report run. Fail loudly instead of
+    // silently generating a divergent runId.
+    if (batchMode && !runId) {
+        throw new Error(`runOfflineFix() invariant violation: batchMode=true but no runId was supplied for "${specPath}". Every fix processed during a batch run must reuse the caller's shared suiteRunId — refusing to fall back to a freshly generated UUID.`);
+    }
     const effectiveRunId = runId || (0, crypto_1.randomUUID)();
     // [DIAGNOSTIC] Print the evaluated batchMode flag and the runId this
     // invocation will actually use. When called from runReportFix(), batchMode
@@ -390,6 +414,7 @@ async function runOfflineFix({ tracePath, specPath, batchMode = false, runId }) 
             // run IDs" / duplicate individual PR bug (e.g. PR #42, #43) when it
             // fires per spec during batch processing.
             console.warn(`🚨 [Diagnostic] "${specPath}" (visual regression) is entering the INDIVIDUAL PR fallback path (batchMode=false). This must never happen during a batch report run.`);
+            assertIndividualPrAllowed(specPath, batchMode);
             const prUrl = await (0, githubPr_1.openHealingPullRequest)(visualHandoffFix);
             if (!prUrl) {
                 console.warn(`⚠️ No pull request was opened for the visual regression review entry for ${specPath}.`);
@@ -443,6 +468,7 @@ async function runOfflineFix({ tracePath, specPath, batchMode = false, runId }) 
         // exact root cause of duplicate individual PRs (#42, #43, ...) and
         // per-spec runIds splitting the Neon run record.
         console.warn(`🚨 [Diagnostic] "${specPath}" is entering the INDIVIDUAL PR fallback path (batchMode=false) with its own runId="${effectiveRunId}". This must never happen during a batch report run.`);
+        assertIndividualPrAllowed(specPath, batchMode);
         const prUrl = await (0, githubPr_1.openHealingPullRequest)(healedFix);
         if (!prUrl) {
             console.warn(`⚠️ No pull request was opened for ${specPath}. Ensure GITHUB_TOKEN and GITHUB_REPOSITORY are set, and that the workflow grants "contents: write" and "pull-requests: write" permissions.`);
