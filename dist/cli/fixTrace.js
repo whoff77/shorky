@@ -225,17 +225,60 @@ function collectFailedSpecsFromReport(report) {
     }
     return Array.from(failuresBySpec.values());
 }
+/**
+ * Resolves the single shared run identifier that every worker/spec in this
+ * Playwright execution should be tagged with, so that a multi-worker run
+ * (see `shorky-test-consumer`'s `workers` config) still produces ONE batch
+ * report / consolidated PR / telemetry dispatch instead of fragmenting per
+ * worker.
+ *
+ * Resolution order (first match wins):
+ *   1. `SHORKY_RUN_ID` env var — set directly by the caller (e.g. an
+ *      orchestrating CI step), or inherited from the Playwright test
+ *      process if `fixTrace.ts` happens to run as a child of it.
+ *   2. `<reportDir>/.shorky-run-id` — the file written by the consuming
+ *      project's `global-setup.ts` *before* Playwright forks any worker
+ *      process. Since `globalSetup` runs once in the parent process prior
+ *      to worker spawn, every worker inherits the same in-memory
+ *      `SHORKY_RUN_ID`, and this file lets that identifier survive across
+ *      process boundaries into this separate `fixTrace.ts` invocation
+ *      (which typically runs as its own GitHub Actions step/process, after
+ *      the Playwright process has already exited).
+ *   3. A freshly minted UUID — used only when neither of the above is
+ *      available (e.g. local ad-hoc runs without global-setup.ts wired up),
+ *      preserving the previous behavior for those cases.
+ */
+function resolveSuiteRunId(reportPath) {
+    if (process.env.SHORKY_RUN_ID) {
+        console.log(`🆔 [Diagnostic] Reusing shared suiteRunId="${process.env.SHORKY_RUN_ID}" from SHORKY_RUN_ID env var.`);
+        return process.env.SHORKY_RUN_ID;
+    }
+    const runIdFilePath = path_1.default.join(path_1.default.dirname(path_1.default.resolve(reportPath)), '.shorky-run-id');
+    if (fs_1.default.existsSync(runIdFilePath)) {
+        const fileRunId = fs_1.default.readFileSync(runIdFilePath, 'utf-8').trim();
+        if (fileRunId) {
+            console.log(`🆔 [Diagnostic] Reusing shared suiteRunId="${fileRunId}" from ${runIdFilePath} (written by global-setup.ts before workers were spawned).`);
+            return fileRunId;
+        }
+    }
+    const generatedRunId = (0, crypto_1.randomUUID)();
+    console.log(`🆔 [Diagnostic] No shared SHORKY_RUN_ID env var or ${runIdFilePath} found — minting a fresh suiteRunId="${generatedRunId}".`);
+    return generatedRunId;
+}
 async function runReportFix({ reportPath }) {
     const absoluteReportPath = path_1.default.resolve(reportPath);
     if (!fs_1.default.existsSync(absoluteReportPath)) {
         console.error(`❌ Report file not found: ${absoluteReportPath}`);
         process.exit(1);
     }
-    // Generate a single suite-wide runId to group all healed traces under one run card.
-    // Every failure discovered in this report is processed with batchMode: true
-    // (see the runOfflineFix() call below) and shares this exact suiteRunId —
-    // no per-fix runId is ever minted while inside this function.
-    const suiteRunId = (0, crypto_1.randomUUID)();
+    // Resolve (not mint) a single suite-wide runId to group all healed traces
+    // under one run card — reusing the exact identifier established by
+    // global-setup.ts before Playwright spawned its parallel workers whenever
+    // one is available, so a multi-worker run still produces one batch/PR.
+    // Every failure discovered in this report is processed with batchMode:
+    // true (see the runOfflineFix() call below) and shares this exact
+    // suiteRunId — no per-fix runId is ever minted while inside this function.
+    const suiteRunId = resolveSuiteRunId(reportPath);
     console.log(`🔍 Resolving failed specs and traces from Playwright JSON report: ${reportPath} (Run ID: ${suiteRunId})...`);
     // [DIAGNOSTIC] Explicitly print the execution mode and generated run ID at
     // the very start of the batch run, before any spec is touched, so it's
