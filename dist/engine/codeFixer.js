@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateSpecFix = generateSpecFix;
 // src/engine/codeFixer.ts
 const openai_1 = require("openai");
+const tokenUsage_1 = require("../utils/tokenUsage");
 /**
  * Sanitizes LLM output to strip markdown fences and leading path comments
  */
@@ -59,6 +60,7 @@ TASK:
         response_format: { type: 'json_object' },
         temperature: 0.1,
     });
+    (0, tokenUsage_1.recordTokenUsage)(response.usage);
     const content = response.choices[0].message.content;
     if (!content)
         throw new Error('LLM returned empty response');
@@ -68,5 +70,6 @@ TASK:
         originalCode: specCode,
         fixedCode: cleanFixedCode,
         explanation: parsed.explanation,
+        tokensUsed: response.usage?.total_tokens || 0,
     };
 }

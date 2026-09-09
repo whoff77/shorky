@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.runAgentGoal = runAgentGoal;
 const openai_1 = __importDefault(require("openai"));
 const tools_1 = require("./tools");
+const tokenUsage_1 = require("../utils/tokenUsage");
 let cachedClient = null;
 function getOpenAIClient() {
     if (cachedClient) {
@@ -25,6 +26,7 @@ async function runAgentGoal(page, options) {
     const { goal, maxSteps = 10, autoHealPage } = options;
     const historyLog = [];
     const traceLogs = [];
+    let tokensUsed = 0;
     const pushTrace = (entry) => {
         traceLogs.push({ timestamp: new Date().toISOString(), ...entry });
     };
@@ -69,6 +71,8 @@ Workflow Rules:
             tool_choice: 'auto',
             temperature: 0.1,
         });
+        (0, tokenUsage_1.recordTokenUsage)(response.usage);
+        tokensUsed += response.usage?.total_tokens || 0;
         const responseMessage = response.choices[0].message;
         messages.push(responseMessage);
         // If model provided reasoning/thought output, log it
@@ -124,5 +128,6 @@ Workflow Rules:
         finalAnswer: finalAnswer || 'Agent execution completed.',
         history: historyLog,
         traceLogs,
+        tokensUsed,
     };
 }
