@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { parsePlaywrightTrace, resolveSpecSourcePath, isVisualRegressionFailure } from '../engine/traceParser';
 import { generateSpecFix, FixResult } from '../engine/codeFixer';
 import { getShorkyCloudApiKey, getShorkyCloudWebhookUrl } from '../config/shorkyCloud';
+import { runPreflightCheck } from './preflight';
 import { HealedFixEntry, openHealingPullRequest, pushConsolidatedHealingBranch, stageHealingFix } from '../utils/githubPr';
 import { overwriteSpecInPlace } from '../agent/generator';
 
@@ -363,6 +364,18 @@ export interface RunReportFixOptions {
 }
 
 export async function runReportFix({ reportPath }: RunReportFixOptions) {
+  // Pre-flight budget guard: abort BEFORE any LLM repair loop starts if the
+  // org's subscription is inactive (402) or its monthly token budget is
+  // exhausted (429). This gates the entire batch report run, since every
+  // failure in the report would otherwise trigger its own billable
+  // generateSpecFix() call. Fails the CI job normally (non-zero exit) with
+  // the reason logged, rather than proceeding into the LLM loop.
+  const preflight = await runPreflightCheck();
+  if (!preflight.ok) {
+    console.error(`🛑 [Shorky] Aborting self-healing run: ${preflight.message}`);
+    process.exit(1);
+  }
+
   const absoluteReportPath = path.resolve(reportPath);
 
   if (!fs.existsSync(absoluteReportPath)) {
@@ -514,9 +527,37 @@ export interface RunOfflineFixOptions {
   specPath: string;
   batchMode?: boolean;
   runId?: string;
+  /**
+   * Set by callers (e.g. `src/cli/index.ts`'s `handleHealOnFailure()`) that
+   * have already performed `runPreflightCheck()` themselves immediately
+   * before invoking this function, so it isn't repeated as a redundant
+   * network call. Defaults to false so any other caller (including
+   * `fixTrace.ts` invoked directly as its own CLI entrypoint, per
+   * `action.yml`) is still guarded even if it forgets to check first.
+   */
+  skipPreflightCheck?: boolean;
 }
 
-export async function runOfflineFix({ tracePath, specPath, batchMode = false, runId }: RunOfflineFixOptions): Promise<HealedFixEntry | null> {
+export async function runOfflineFix({
+  tracePath,
+  specPath,
+  batchMode = false,
+  runId,
+  skipPreflightCheck = false,
+}: RunOfflineFixOptions): Promise<HealedFixEntry | null> {
+  // Pre-flight budget guard: only run here for the standalone (non-batch)
+  // --trace/--spec invocation. Batch runs (runReportFix) already perform
+  // this check exactly once before the loop that calls runOfflineFix() for
+  // each failure — re-checking per-spec here would be redundant network
+  // calls and could abort mid-batch after some fixes already succeeded.
+  if (!batchMode && !skipPreflightCheck) {
+    const preflight = await runPreflightCheck();
+    if (!preflight.ok) {
+      console.error(`🛑 [Shorky] Aborting self-healing run: ${preflight.message}`);
+      process.exit(1);
+    }
+  }
+
   const absoluteTracePath = path.resolve(tracePath);
   const absoluteSpecPath = path.resolve(specPath);
 

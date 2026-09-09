@@ -59,6 +59,7 @@ Instead of running expensive, unpredictable LLM reasoning loops on every single 
 * Self-Healing DOM Fixtures: Resilient element interceptors dynamically catch selector changes on the fly to reduce test flakiness.
 * Visual Regression Baselines: Cross-platform snapshot comparisons powered by pixelmatch with semantic vision assertion fallbacks.
 * CI/CD Optimized: High execution speed for regular regression suites by decoupling test generation from test execution.
+* Pre-Flight Budget Guard: Before starting any LLM-driven self-healing repair loop, Shorky checks in with `shorky-cloud` (`/api/v1/preflight`) to confirm the org's subscription is active and its monthly token budget hasn't been exceeded — aborting gracefully (and failing the CI job normally) with a `402`/`429` instead of racking up unbounded LLM spend.
 
 ---
 
@@ -128,6 +129,10 @@ shorky/
 │   │   ├── agentRunner.ts     # ReAct execution loop & tool definitions
 │   │   ├── generator.ts       # Code synthesis engine (Trace -> Spec)
 │   │   └── tools.ts           # Browser action tool definitions
+│   ├── cli/
+│   │   ├── index.ts            # `shorky run` CLI entrypoint
+│   │   ├── preflight.ts        # Pre-flight subscription/budget guard (calls shorky-cloud)
+│   │   └── fixTrace.ts         # GitHub Action auto-heal fixer logic
 │   ├── fixtures/
 │   │   └── autoHealFixture.ts # Resilient, self-healing Playwright fixture
 │   └── utils/
