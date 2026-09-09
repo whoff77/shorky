@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { Page } from '@playwright/test';
 import * as dotenv from 'dotenv';
+import { recordTokenUsage } from './tokenUsage';
 
 dotenv.config();
 
@@ -47,6 +48,8 @@ Return ONLY the best valid CSS selector to click the intended element (e.g. butt
     temperature: 0,
   });
 
+  recordTokenUsage(response.usage);
+
   const healedSelector = response.choices[0]?.message?.content?.trim() || 'button[type="submit"]';
   return healedSelector;
 }
@@ -83,6 +86,8 @@ Does the visual representation satisfy the expectation? Reply ONLY in valid JSON
     response_format: { type: 'json_object' },
     temperature: 0,
   });
+
+  recordTokenUsage(response.usage);
 
   const content = response.choices[0]?.message?.content || '{}';
   return JSON.parse(content);

@@ -1,6 +1,7 @@
 import { Page } from '@playwright/test';
 import OpenAI from 'openai';
 import { SHORKY_AGENT_TOOLS, executeAgentTool, AgentTraceEntry } from './tools';
+import { recordTokenUsage } from '../utils/tokenUsage';
 
 let cachedClient: OpenAI | null = null;
 
@@ -29,6 +30,8 @@ export interface AgentRunResult {
   finalAnswer: string;
   history: string[];
   traceLogs: AgentTraceEntry[];
+  /** Total LLM tokens consumed by this run's chat-completion calls (sum of `response.usage.total_tokens` across all ReAct cycles). */
+  tokensUsed: number;
 }
 
 /**
@@ -42,6 +45,7 @@ export async function runAgentGoal(
   const { goal, maxSteps = 10, autoHealPage } = options;
   const historyLog: string[] = [];
   const traceLogs: AgentTraceEntry[] = [];
+  let tokensUsed = 0;
 
   const pushTrace = (entry: Omit<AgentTraceEntry, 'timestamp'>) => {
     traceLogs.push({ timestamp: new Date().toISOString(), ...entry });
@@ -92,6 +96,9 @@ Workflow Rules:
       tool_choice: 'auto',
       temperature: 0.1,
     });
+
+    recordTokenUsage(response.usage);
+    tokensUsed += response.usage?.total_tokens || 0;
 
     const responseMessage = response.choices[0].message;
     messages.push(responseMessage);
@@ -155,5 +162,6 @@ Workflow Rules:
     finalAnswer: finalAnswer || 'Agent execution completed.',
     history: historyLog,
     traceLogs,
+    tokensUsed,
   };
 }

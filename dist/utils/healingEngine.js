@@ -40,6 +40,7 @@ exports.healSelector = healSelector;
 exports.assertVisual = assertVisual;
 const openai_1 = __importDefault(require("openai"));
 const dotenv = __importStar(require("dotenv"));
+const tokenUsage_1 = require("./tokenUsage");
 dotenv.config();
 // Lazily instantiated & cached so top-level imports of this module never
 // fail when OPENAI_API_KEY is absent (e.g. in CI jobs that only run
@@ -76,6 +77,7 @@ Return ONLY the best valid CSS selector to click the intended element (e.g. butt
         ],
         temperature: 0,
     });
+    (0, tokenUsage_1.recordTokenUsage)(response.usage);
     const healedSelector = response.choices[0]?.message?.content?.trim() || 'button[type="submit"]';
     return healedSelector;
 }
@@ -107,6 +109,7 @@ Does the visual representation satisfy the expectation? Reply ONLY in valid JSON
         response_format: { type: 'json_object' },
         temperature: 0,
     });
+    (0, tokenUsage_1.recordTokenUsage)(response.usage);
     const content = response.choices[0]?.message?.content || '{}';
     return JSON.parse(content);
 }

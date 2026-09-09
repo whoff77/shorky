@@ -8,6 +8,7 @@ const commander_1 = require("commander");
 const child_process_1 = require("child_process");
 const traceParser_1 = require("../engine/traceParser");
 const fixTrace_1 = require("./fixTrace");
+const preflight_1 = require("./preflight");
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
 const program = new commander_1.Command();
@@ -41,6 +42,13 @@ function printBanner(options) {
  * its associated failing spec file, and runs the offline self-healing fixer
  * against it. Used as a fallback when Playwright exits non-zero and
  * `--heal` is enabled.
+ *
+ * Before any LLM repair loop is started, `runOfflineFix()` (called below)
+ * performs a pre-flight budget check against shorky-cloud's
+ * `/api/v1/preflight` endpoint (see `src/cli/preflight.ts`). If the org's
+ * subscription is inactive (402) or its monthly token budget is exceeded
+ * (429), the fixer aborts immediately with a logged error and a non-zero
+ * exit code — no OpenAI call is ever made, and the CI job fails normally.
  */
 async function handleHealOnFailure() {
     console.log('\n🩹 [Shorky] --heal enabled. Attempting automatic self-healing fix...');
@@ -56,8 +64,18 @@ async function handleHealOnFailure() {
     }
     console.log(`🔎 [Shorky] Found trace: ${tracePath}`);
     console.log(`🔎 [Shorky] Resolved failing spec: ${specPath}`);
+    // Pre-flight budget guard: run this BEFORE the LLM repair loop starts.
+    // If the org's subscription is inactive (402) or its monthly token
+    // budget is exceeded (429), abort the self-healing attempt immediately,
+    // log the reason, and fail the CI job normally (non-zero exit) rather
+    // than proceeding into an LLM call.
+    const preflight = await (0, preflight_1.runPreflightCheck)();
+    if (!preflight.ok) {
+        console.error(`🛑 [Shorky] Aborting self-healing run: ${preflight.message}`);
+        process.exit(1);
+    }
     try {
-        await (0, fixTrace_1.runOfflineFix)({ tracePath, specPath });
+        await (0, fixTrace_1.runOfflineFix)({ tracePath, specPath, skipPreflightCheck: true });
     }
     catch (error) {
         console.error('❌ [Shorky] Self-healing attempt failed:', error instanceof Error ? error.message : error);

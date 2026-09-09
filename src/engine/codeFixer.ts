@@ -1,11 +1,14 @@
 // src/engine/codeFixer.ts
 import { OpenAI } from 'openai';
 import { TraceFailureContext } from './traceParser';
+import { recordTokenUsage } from '../utils/tokenUsage';
 
 export interface FixResult {
   originalCode: string;
   fixedCode: string;
   explanation: string;
+  /** LLM tokens consumed generating this fix (`response.usage.total_tokens`), 0 if unavailable. */
+  tokensUsed: number;
 }
 
 /**
@@ -74,6 +77,8 @@ TASK:
     temperature: 0.1,
   });
 
+  recordTokenUsage(response.usage);
+
   const content = response.choices[0].message.content;
   if (!content) throw new Error('LLM returned empty response');
 
@@ -84,5 +89,6 @@ TASK:
     originalCode: specCode,
     fixedCode: cleanFixedCode,
     explanation: parsed.explanation,
+    tokensUsed: response.usage?.total_tokens || 0,
   };
 }

@@ -1,6 +1,22 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const shorkyCloud_1 = require("../config/shorkyCloud");
+const autoHealFixture_1 = require("../fixtures/autoHealFixture");
+/**
+ * Extracts the LLM token count `autoHealFixture.ts` attached to this test
+ * result (see `SHORKY_TOKENS_ATTACHMENT_NAME`), if any. Attachments cross
+ * the worker-process -> main-process boundary as plain buffers/strings, so
+ * this parses the attachment body back into a number, defensively falling
+ * back to 0 for any malformed/missing attachment rather than throwing.
+ */
+function extractTokensUsed(result) {
+    const attachment = result.attachments.find((a) => a.name === autoHealFixture_1.SHORKY_TOKENS_ATTACHMENT_NAME);
+    if (!attachment)
+        return 0;
+    const raw = attachment.body ? attachment.body.toString('utf-8') : undefined;
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
 class ShorkyCloudReporter {
     apiEndpoint;
     apiKey;
@@ -34,10 +50,12 @@ class ShorkyCloudReporter {
             testStatus = 'failed';
         }
         const errorMessage = result.error?.message || result.error?.stack;
+        const tokensUsed = extractTokensUsed(result);
         this.testItems.push({
             title: test.title,
             status: testStatus,
             error: errorMessage,
+            tokensUsed,
         });
     }
     async onEnd(result) {
@@ -52,6 +70,13 @@ class ShorkyCloudReporter {
             const passedCount = this.runData.passed;
             const failedCount = this.runData.failed;
             const durationMs = Math.round(result.duration ?? 0);
+            // Sum of every test's tokensUsed (captured from OpenAI response.usage
+            // during self-healing/vision calls — see tokenUsage.ts and
+            // autoHealFixture.ts). Reported both per-test and as a run-level
+            // total below; shorky-cloud's /api/v1/telemetry uses the run-level
+            // total when present, atomically incrementing that project's
+            // tokensUsedThisMonth for the /api/v1/preflight budget guard.
+            const totalTokensUsed = this.testItems.reduce((sum, item) => sum + item.tokensUsed, 0);
             // Construct the flattened payload matching shorky-cloud's Zod schema
             const telemetryPayload = {
                 projectName: process.env.SHORKY_PROJECT_NAME || 'shorky',
@@ -59,6 +84,7 @@ class ShorkyCloudReporter {
                 passedCount,
                 failedCount,
                 durationMs,
+                tokensUsed: totalTokensUsed,
                 tests: this.testItems.map((item) => ({
                     testName: item.title,
                     status: item.status,
@@ -72,6 +98,7 @@ class ShorkyCloudReporter {
                             }]
                         : [],
                     selfHealingCount: item.status === 'healed' ? 1 : 0,
+                    tokensUsed: item.tokensUsed,
                 }))
             };
             const response = await fetch(cloudUrl, {

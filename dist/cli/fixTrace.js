@@ -11,6 +11,7 @@ const crypto_1 = require("crypto");
 const traceParser_1 = require("../engine/traceParser");
 const codeFixer_1 = require("../engine/codeFixer");
 const shorkyCloud_1 = require("../config/shorkyCloud");
+const preflight_1 = require("./preflight");
 const githubPr_1 = require("../utils/githubPr");
 const generator_1 = require("../agent/generator");
 const dotenv_1 = __importDefault(require("dotenv"));
@@ -266,6 +267,17 @@ function resolveSuiteRunId(reportPath) {
     return generatedRunId;
 }
 async function runReportFix({ reportPath }) {
+    // Pre-flight budget guard: abort BEFORE any LLM repair loop starts if the
+    // org's subscription is inactive (402) or its monthly token budget is
+    // exhausted (429). This gates the entire batch report run, since every
+    // failure in the report would otherwise trigger its own billable
+    // generateSpecFix() call. Fails the CI job normally (non-zero exit) with
+    // the reason logged, rather than proceeding into the LLM loop.
+    const preflight = await (0, preflight_1.runPreflightCheck)();
+    if (!preflight.ok) {
+        console.error(`🛑 [Shorky] Aborting self-healing run: ${preflight.message}`);
+        process.exit(1);
+    }
     const absoluteReportPath = path_1.default.resolve(reportPath);
     if (!fs_1.default.existsSync(absoluteReportPath)) {
         console.error(`❌ Report file not found: ${absoluteReportPath}`);
@@ -389,7 +401,19 @@ async function runReportFix({ reportPath }) {
     // than registering a separate run per spec.
     await notifyShorkyCloudBatch(healedFixes, suiteRunId);
 }
-async function runOfflineFix({ tracePath, specPath, batchMode = false, runId }) {
+async function runOfflineFix({ tracePath, specPath, batchMode = false, runId, skipPreflightCheck = false, }) {
+    // Pre-flight budget guard: only run here for the standalone (non-batch)
+    // --trace/--spec invocation. Batch runs (runReportFix) already perform
+    // this check exactly once before the loop that calls runOfflineFix() for
+    // each failure — re-checking per-spec here would be redundant network
+    // calls and could abort mid-batch after some fixes already succeeded.
+    if (!batchMode && !skipPreflightCheck) {
+        const preflight = await (0, preflight_1.runPreflightCheck)();
+        if (!preflight.ok) {
+            console.error(`🛑 [Shorky] Aborting self-healing run: ${preflight.message}`);
+            process.exit(1);
+        }
+    }
     const absoluteTracePath = path_1.default.resolve(tracePath);
     const absoluteSpecPath = path_1.default.resolve(specPath);
     // Hard invariant: in batch mode, the caller (runReportFix) MUST supply the

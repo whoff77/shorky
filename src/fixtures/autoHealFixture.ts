@@ -1,8 +1,19 @@
 import { test as baseTest, Page, expect } from '@playwright/test';
 import { healSelector, assertVisual } from '../utils/healingEngine';
 import { assertVisualBaseline, VisualDiffOptions } from '../utils/visual-diff';
+import { getTokensUsedThisTest, resetTokensUsedThisTest } from '../utils/tokenUsage';
 import * as fs from 'fs';
 import * as path from 'path';
+
+/**
+ * Attachment name used to bridge LLM token usage from the worker process
+ * (where fixtures/test bodies run and OpenAI calls actually happen — see
+ * `healingEngine.ts`'s `recordTokenUsage()`) to the main process reporter
+ * (`cloudReporter.ts`, which runs in a separate process and has no direct
+ * access to worker-local state). `cloudReporter.ts`'s `onTestEnd()` looks
+ * for an attachment with this exact name.
+ */
+export const SHORKY_TOKENS_ATTACHMENT_NAME = 'shorky-tokens-used';
 
 const REGISTRY_PATH = path.join(__dirname, 'healed-selectors.json');
 
@@ -36,7 +47,12 @@ export type AutoHealFixtures = {
 };
 
 export const test = baseTest.extend<AutoHealFixtures>({
-  autoHealPage: async ({ page }, use) => {
+  autoHealPage: async ({ page }, use, testInfo) => {
+    // Reset the per-test token counter at fixture setup so tokens consumed
+    // by a *previous* test sharing this worker process never bleed into
+    // the current test's reported usage (see tokenUsage.ts).
+    resetTokensUsedThisTest();
+
     const clickAndHeal = async (selector: string) => {
       const registry = loadRegistry();
       const activeSelector = registry[selector] || selector;
@@ -83,6 +99,19 @@ export const test = baseTest.extend<AutoHealFixtures>({
       assertVisual: runVisualCheck,
       assertVisualBaseline: runVisualBaseline,
     });
+
+    // Fixture teardown (runs after the test body completes, but while
+    // `testInfo` is still attachable): snapshot the tokens consumed by any
+    // self-healing/vision calls made during this test and attach them to
+    // the test result so `cloudReporter.ts` (running in the main process)
+    // can read them back out in `onTestEnd()`.
+    const tokensUsed = getTokensUsedThisTest();
+    if (tokensUsed > 0) {
+      await testInfo.attach(SHORKY_TOKENS_ATTACHMENT_NAME, {
+        body: String(tokensUsed),
+        contentType: 'text/plain',
+      });
+    }
   },
 });
 

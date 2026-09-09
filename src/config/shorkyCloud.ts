@@ -73,3 +73,16 @@ export function getShorkyCloudWebhookUrl(defaultBaseUrl: string = DEFAULT_SHORKY
   const trimmedBase = base.replace(/\/api\/v1\/telemetry\/?$/, '').replace(/\/+$/, '');
   return `${trimmedBase}/api/webhook`;
 }
+
+/**
+ * Resolves the fully-qualified pre-flight budget-check endpoint
+ * (`/api/v1/preflight`) that the CLI/action calls before starting any
+ * LLM-driven repair loop (see `src/cli/preflight.ts`). Accepts the same
+ * optional base-URL override pattern as `getShorkyCloudWebhookUrl` since
+ * different call sites use different sensible fallbacks.
+ */
+export function getShorkyCloudPreflightUrl(defaultBaseUrl: string = DEFAULT_SHORKY_CLOUD_BASE_URL): string {
+  const base = sanitizeCloudUrl(process.env.SHORKY_CLOUD_URL || defaultBaseUrl);
+  const trimmedBase = base.replace(/\/api\/v1\/telemetry\/?$/, '').replace(/\/+$/, '');
+  return `${trimmedBase}/api/v1/preflight`;
+}

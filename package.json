@@ -8,7 +8,9 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "shorky": "tsx src/cli/index.ts"
+    "shorky": "tsx src/cli/index.ts",
+    "test": "node --import tsx --test $(find src -type d -name __tests__ -exec find {} -name '*.test.ts' \\;)",
+    "test:watch": "node --import tsx --test --watch $(find src -type d -name __tests__ -exec find {} -name '*.test.ts' \\;)"
   },
   "repository": {
     "type": "git",
