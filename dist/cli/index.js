@@ -34,6 +34,8 @@ async function printBanner(options) {
     const vision = options.vision ? 'ON' : 'OFF';
     const headed = options.headed ? 'ON' : 'OFF';
     const generateOnly = options.generateOnly ? 'ON' : 'OFF';
+    const updateBaselines = options.updateBaselines ? 'ON' : 'OFF';
+    const projectLabel = options.project ?? 'all projects (playwright.config.ts matrix)';
     const banner = `
  ____  _                 _
 / ___|| |__   ___  _ __ | | ___   _
@@ -43,8 +45,8 @@ async function printBanner(options) {
                                |___/
 `;
     console.log(banner);
-    console.log(`🤖 [Shorky] Launching test run -> [${options.project}] ` +
-        `[Self-Healing: ${heal}] [Vision: ${vision}] [Headed: ${headed}] [Generate-Only: ${generateOnly}]`);
+    console.log(`🤖 [Shorky] Launching test run -> [${projectLabel}] ` +
+        `[Self-Healing: ${heal}] [Vision: ${vision}] [Headed: ${headed}] [Generate-Only: ${generateOnly}] [Auto-Accept Visual Baselines: ${updateBaselines}]`);
     const preflight = await (0, preflight_1.runPreflightCheck)();
     const storageBanner = (0, preflight_1.formatStorageBanner)(preflight.storage);
     if (storageBanner) {
@@ -70,7 +72,7 @@ async function printBanner(options) {
  * re-logged here as a fresh confirmation of free-tier telemetry quota
  * usage, in case it changed since `printBanner()`'s earlier check.
  */
-async function handleHealOnFailure() {
+async function handleHealOnFailure(options = {}) {
     console.log('\n🩹 [Shorky] --heal enabled. Attempting automatic self-healing fix...');
     const tracePath = (0, traceParser_1.findLatestTraceZip)();
     if (!tracePath) {
@@ -99,7 +101,7 @@ async function handleHealOnFailure() {
         process.exit(1);
     }
     try {
-        await (0, fixTrace_1.runOfflineFix)({ tracePath, specPath, skipPreflightCheck: true });
+        await (0, fixTrace_1.runOfflineFix)({ tracePath, specPath, skipPreflightCheck: true, updateBaselines: options.updateBaselines });
     }
     catch (error) {
         console.error('❌ [Shorky] Self-healing attempt failed:', error instanceof Error ? error.message : error);
@@ -109,23 +111,35 @@ program
     .command('run')
     .description('Run Shorky/Playwright tests with AI-powered self-healing and vision capabilities')
     .argument('[test-pattern]', 'Optional Playwright test file/pattern filter')
-    .option('--project <name>', 'Browser project name to execute against', 'Google Chrome')
+    .option('--project <name>', 'Browser project name to execute against (defaults to running the full ' +
+    'playwright.config.ts projects matrix — Google Chrome, firefox, webkit)')
     .option('--heal', 'Enable automatic multi-tier selector self-healing', false)
     .option('--vision', 'Enable AI vision-based DOM evaluation and audit checks', false)
     .option('--generate-only', 'Generate standard Playwright specs without persisting cloud telemetry', false)
     .option('--headed', 'Run browser instances in headed mode for visual debugging', false)
+    .option('--update-baselines', '"Auto-Accept Visual Baselines": when a visual regression is detected during --heal, automatically ' +
+    'overwrite the local baseline PNG with the newly captured actual screenshot and stage it in the ' +
+    'auto-heal PR instead of only flagging it for manual review', false)
     .action(async (testPattern, options) => {
     // Map CLI flags -> Shorky runtime environment/config
     process.env.SHORKY_HEAL = options.heal ? 'true' : 'false';
     process.env.SHORKY_VISION = options.vision ? 'true' : 'false';
     process.env.SHORKY_GENERATE_ONLY = options.generateOnly ? 'true' : 'false';
-    process.env.SHORKY_PROJECT_NAME = options.project;
+    if (options.project) {
+        process.env.SHORKY_PROJECT_NAME = options.project;
+    }
     await printBanner(options);
     const args = ['playwright', 'test'];
     if (testPattern) {
         args.push(testPattern);
     }
-    args.push('--project', options.project);
+    // No --project flag by default: delegate to playwright.config.ts's
+    // projects array, which runs the full Chromium/firefox/webkit matrix.
+    // Pass --project explicitly only when the caller opts into a single
+    // browser (e.g. local hardware constraints preventing firefox/webkit).
+    if (options.project) {
+        args.push('--project', options.project);
+    }
     if (options.headed) {
         args.push('--headed');
     }
@@ -146,7 +160,7 @@ program
         }
         console.error(`\n⚠️ [Shorky] Test run exited with code ${code}.`);
         if (options.heal) {
-            void handleHealOnFailure().finally(() => process.exit(code ?? 1));
+            void handleHealOnFailure({ updateBaselines: options.updateBaselines }).finally(() => process.exit(code ?? 1));
         }
         else {
             process.exit(code ?? 1);

@@ -117,3 +117,64 @@ test('stageHealingFix: does not attempt to commit visual-regression entries (no 
   const commitCalls = execCalls.filter((args) => args[0] === 'commit');
   assert.equal(commitCalls.length, 0);
 });
+
+// --- stageHealingFix / buildPrBody: "Auto-Accept Visual Baselines" -------
+
+test('stageHealingFix: git add/commits the updated baseline PNG when baselineUpdated is true', () => {
+  const execCalls: string[][] = [];
+  mock.method(childProcess, 'execFileSync', (_cmd: string, args: string[]) => {
+    execCalls.push(args);
+    if (args[0] === 'rev-parse') return Buffer.from('shorky/auto-heal-fixes');
+    return Buffer.from('');
+  });
+
+  stageHealingFix({
+    specPath: 'tests/visual.spec.ts',
+    explanation: 'Visual regression auto-accepted.',
+    isVisualRegression: true,
+    baselineUpdated: true,
+    visualDiff: {
+      expectedPath: 'tests/__snapshots__/visual.spec.ts/sample.png',
+      actualPath: 'test-results/visual/sample-actual.png',
+    },
+    testName: 'visual test',
+  });
+
+  const addCalls = execCalls.filter((args) => args[0] === 'add');
+  const commitCalls = execCalls.filter((args) => args[0] === 'commit');
+
+  assert.equal(addCalls.length, 1, 'git add should stage the updated baseline PNG');
+  assert.deepEqual(addCalls[0], ['add', 'tests/__snapshots__/visual.spec.ts/sample.png']);
+  assert.equal(commitCalls.length, 1, 'git commit should run once for the updated baseline');
+});
+
+test('buildPrBody: lists baselineUpdated visual fixes under the "Auto-Updated Visual Baselines" section, separate from manual-review visual fixes', () => {
+  const fixes: HealedFixEntry[] = [
+    {
+      specPath: '/repo/tests/auto-updated.spec.ts',
+      explanation: 'Baseline auto-accepted.',
+      isVisualRegression: true,
+      baselineUpdated: true,
+      visualDiff: { expectedPath: '/repo/tests/__snapshots__/auto-updated.spec.ts/sample.png', actualPath: '/tmp/actual.png' },
+      testName: 'auto updated test',
+    },
+    {
+      specPath: '/repo/tests/manual-review.spec.ts',
+      explanation: 'Visual regression detected.',
+      isVisualRegression: true,
+      testName: 'manual review test',
+    },
+  ];
+
+  const body = buildPrBody(fixes, '/repo');
+
+  assert.match(body, /Auto-Updated Visual Baselines/);
+  assert.match(body, /auto-updated\.spec\.ts/);
+  assert.match(body, /\[Visual Review Required\]/);
+  assert.match(body, /manual-review\.spec\.ts/);
+
+  // The auto-updated entry must NOT also appear under the manual-review section.
+  const visualReviewSectionIndex = body.indexOf('[Visual Review Required]');
+  const manualSectionText = body.slice(visualReviewSectionIndex);
+  assert.doesNotMatch(manualSectionText, /auto-updated\.spec\.ts/);
+});

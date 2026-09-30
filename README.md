@@ -70,6 +70,7 @@ Shorky is designed as a three-part ecosystem, separating the core open-source en
 * **Zero CI Latency:** Tests run normally. The LLM is only invoked if a test actually fails.
 * **Pre-Flight Governance Guard:** Before starting any LLM repair loop, Shorky queries `shorky-cloud`'s tier-aware `/api/v1/governance/preflight` endpoint to confirm the organization's monthly token budget hasn't been exceeded, gracefully aborting (via `allowExecution: false`) to prevent unbounded OpenAI spend. The same check also reports free-tier cloud telemetry storage-quota usage, letting the CLI skip a wasted `/api/v1/telemetry` upload once quota is exhausted and surface a "⚠️ 8,200/10,000 free telemetry events used" warning in the run banner.
 * **Visual Regression Fallbacks:** Handles pixelmatch diffs safely by flagging them for human review rather than hallucinating code changes for intentional UI updates.
+* **Auto-Accept Visual Baselines (opt-in):** When enabled (`--update-baselines` / `update-visual-baselines`), Shorky automatically overwrites the local baseline PNG with the new "actual" screenshot from the failing run and stages it into the batched PR under its own "🖼️ Auto-Updated Visual Baselines" section — no manual review step required. Defaults to off, preserving the flag-for-review behavior above.
 
 ---
 
@@ -98,7 +99,15 @@ Add the Shorky action to your Playwright workflow directly after your test step.
           shorky-cloud-api-key: ${{ secrets.SHORKY_CLOUD_API_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           report-path: "test-results/report.json"
+          # Optional: "Auto-Accept Visual Baselines". By default (omitted/false),
+          # visual regressions are only flagged for manual review in the PR body.
+          # Set to 'true' to have Shorky automatically overwrite the local
+          # baseline PNG with the new "actual" screenshot and stage it into the
+          # auto-heal PR instead.
+          update-visual-baselines: "false"
 ```
+
+Locally, the equivalent CLI flag is `--update-baselines` (e.g. `shorky run --heal --update-baselines`).
 
 ### Usage Locally (CLI)
 

@@ -24,6 +24,16 @@ inputs:
     description: 'Path to the Playwright JSON report file'
     required: false
     default: 'test-results/report.json'
+  update-visual-baselines:
+    description: >-
+      "Auto-Accept Visual Baselines": when true, any visual regression (screenshot/pixel-diff) failure
+      detected in the report has its local baseline PNG automatically overwritten with the newly captured
+      "actual" screenshot from the failing run, and the updated baseline is staged into the batched
+      auto-heal pull request. Defaults to false, which preserves the existing "flag for human review"
+      behavior (no file is modified; the diff artifacts are only listed in the PR body for a human to
+      review and accept/reject manually).
+    required: false
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -51,6 +61,12 @@ runs:
         # multi-worker Playwright run's batch report, consolidated PR, and
         # telemetry dispatch tagged with one single run identifier.
         SHORKY_RUN_ID: ${{ env.SHORKY_RUN_ID }}
+        UPDATE_VISUAL_BASELINES: ${{ inputs.update-visual-baselines }}
       run: |
         echo "🔍 Resolving failed specs and traces from Playwright JSON report..."
-        npx tsx "${{ github.action_path }}/src/cli/fixTrace.ts" --report "$REPORT_PATH"
+        UPDATE_BASELINES_FLAG=""
+        if [ "$UPDATE_VISUAL_BASELINES" = "true" ]; then
+          echo "🖼️ Auto-Accept Visual Baselines enabled — visual regressions will have their baseline PNG automatically updated and staged in the PR."
+          UPDATE_BASELINES_FLAG="--update-baselines"
+        fi
+        npx tsx "${{ github.action_path }}/src/cli/fixTrace.ts" --report "$REPORT_PATH" $UPDATE_BASELINES_FLAG

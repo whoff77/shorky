@@ -4,6 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.notifyShorkyCloudBatch = notifyShorkyCloudBatch;
+exports.updateVisualBaseline = updateVisualBaseline;
 exports.collectFailedSpecsFromReport = collectFailedSpecsFromReport;
 exports.runReportFix = runReportFix;
 exports.runOfflineFix = runOfflineFix;
@@ -154,6 +155,39 @@ async function notifyShorkyCloudBatch(fixes, runId) {
     // this run has been dispatched (rather than per-fix, which would spam the
     // log with the same line N times for an N-fix batch).
     (0, shorkyCloud_1.logDashboardCallToAction)();
+}
+/**
+ * "Auto-Accept Visual Baselines": overwrites the local baseline PNG
+ * (`visualDiff.expectedPath`, which is the exact on-disk path under
+ * `__snapshots__/` that Playwright's `toHaveScreenshot()` compares against
+ * — see `extractVisualDiffArtifacts`) with the newly captured "actual"
+ * screenshot from the failing run (`visualDiff.actualPath`, written by
+ * Playwright to `test-results/<test-dir>/`).
+ *
+ * Returns true when the write succeeded (both paths were present and the
+ * actual screenshot existed on disk), false otherwise — callers must treat
+ * a false return as "leave this as a manual-review visual diff handoff"
+ * rather than silently claiming the baseline was updated.
+ */
+function updateVisualBaseline(visualDiff) {
+    if (!visualDiff?.expectedPath || !visualDiff?.actualPath) {
+        console.warn('⚠️ [Auto-Accept Visual Baselines] Missing expected/actual PNG path(s) — cannot overwrite the baseline. Falling back to manual review.');
+        return false;
+    }
+    if (!fs_1.default.existsSync(visualDiff.actualPath)) {
+        console.warn(`⚠️ [Auto-Accept Visual Baselines] Actual screenshot not found on disk: ${visualDiff.actualPath}. Falling back to manual review.`);
+        return false;
+    }
+    try {
+        fs_1.default.mkdirSync(path_1.default.dirname(visualDiff.expectedPath), { recursive: true });
+        fs_1.default.copyFileSync(visualDiff.actualPath, visualDiff.expectedPath);
+        console.log(`🖼️ [Auto-Accept Visual Baselines] Overwrote baseline "${visualDiff.expectedPath}" with the new actual screenshot from this run.`);
+        return true;
+    }
+    catch (err) {
+        console.warn(`⚠️ [Auto-Accept Visual Baselines] Failed to overwrite baseline "${visualDiff.expectedPath}":`, err.message || err);
+        return false;
+    }
 }
 /**
  * Extracts the expected/actual/diff PNG attachment paths Playwright records
@@ -307,7 +341,7 @@ function resolveSuiteRunId(reportPath) {
     // report file (matching where global-setup.ts/cloudReporter.ts write it).
     return (0, executionId_1.getExecutionId)(path_1.default.dirname(path_1.default.resolve(reportPath)));
 }
-async function runReportFix({ reportPath }) {
+async function runReportFix({ reportPath, updateBaselines = false }) {
     // Pre-flight budget guard: abort BEFORE any LLM repair loop starts if the
     // org's subscription is inactive (402) or its monthly token budget is
     // exhausted (429). This gates the entire batch report run, since every
@@ -386,27 +420,42 @@ async function runReportFix({ reportPath }) {
         const visualFailures = group.filter((f) => f.isVisualRegression);
         const codeFailures = group.filter((f) => !f.isVisualRegression);
         for (const failure of visualFailures) {
-            console.log(`🖼️ Detected a visual regression failure for ${failure.specPath} ("${failure.testTitle || 'unknown test'}"). Bypassing LLM code repair (Visual Diff Handoff).`);
+            console.log(`🖼️ Detected a visual regression failure for ${failure.specPath} ("${failure.testTitle || 'unknown test'}").`);
             if (failure.visualDiff?.expectedPath)
                 console.log(`   - Expected: ${failure.visualDiff.expectedPath}`);
             if (failure.visualDiff?.actualPath)
                 console.log(`   - Actual:   ${failure.visualDiff.actualPath}`);
             if (failure.visualDiff?.diffPath)
                 console.log(`   - Diff:     ${failure.visualDiff.diffPath}`);
+            // "Auto-Accept Visual Baselines": opted-in via --update-baselines /
+            // update-visual-baselines. Bypasses LLM code repair either way (a
+            // genuine pixel discrepancy can never be fixed by adjusting
+            // selectors/actions) — the only difference is whether the new
+            // screenshot is automatically accepted as the baseline or left for a
+            // human to review.
+            const baselineUpdated = updateBaselines && updateVisualBaseline(failure.visualDiff);
             const visualHandoffFix = {
                 specPath: failure.specPath,
-                explanation: 'Visual regression detected — code-level repair skipped. Review the pixel diff artifacts and update the baseline snapshot or fix the UI as appropriate.',
+                explanation: baselineUpdated
+                    ? 'Visual regression detected — the new screenshot was automatically accepted as the updated baseline (--update-baselines / update-visual-baselines enabled).'
+                    : 'Visual regression detected — code-level repair skipped. Review the pixel diff artifacts and update the baseline snapshot or fix the UI as appropriate.',
                 errorLog: failure.errorLog,
                 isVisualRegression: true,
+                baselineUpdated,
                 visualDiff: failure.visualDiff,
                 testName: failure.testTitle || path_1.default.basename(failure.specPath),
             };
+            if (!baselineUpdated) {
+                console.log(`🖼️ Bypassing LLM code repair (Visual Diff Handoff) for "${failure.specPath}".`);
+            }
             try {
                 (0, githubPr_1.stageHealingFix)(visualHandoffFix);
-                console.log(`🌿 [Diagnostic] Staged visual diff handoff entry for "${failure.specPath}" onto the shared consolidated healing branch (no PR opened yet).`);
+                console.log(baselineUpdated
+                    ? `🌿 [Diagnostic] Staged auto-updated visual baseline for "${failure.specPath}" onto the shared consolidated healing branch (no PR opened yet).`
+                    : `🌿 [Diagnostic] Staged visual diff handoff entry for "${failure.specPath}" onto the shared consolidated healing branch (no PR opened yet).`);
             }
             catch (err) {
-                console.warn(`⚠️ Failed to stage the visual diff handoff entry for ${failure.specPath}:`, err.message || err);
+                console.warn(`⚠️ Failed to stage the visual regression entry for ${failure.specPath}:`, err.message || err);
             }
             healedFixes.push(visualHandoffFix);
         }
@@ -484,7 +533,7 @@ async function runReportFix({ reportPath }) {
     // than registering a separate run per spec.
     await notifyShorkyCloudBatch(healedFixes, suiteRunId);
 }
-async function runOfflineFix({ tracePath, specPath, batchMode = false, runId, skipPreflightCheck = false, additionalFailingTests, }) {
+async function runOfflineFix({ tracePath, specPath, batchMode = false, runId, skipPreflightCheck = false, additionalFailingTests, updateBaselines = false, }) {
     // Pre-flight budget guard: only run here for the standalone (non-batch)
     // --trace/--spec invocation. Batch runs (runReportFix) already perform
     // this check exactly once before the loop that calls runOfflineFix() for
@@ -549,6 +598,9 @@ async function runOfflineFix({ tracePath, specPath, batchMode = false, runId, sk
     }
     if ((0, traceParser_1.isVisualRegressionFailure)(failureContext.errorMessage)) {
         console.log(`🖼️ Detected a visual regression failure for ${specPath}. Bypassing LLM code repair (Visual Diff Handoff).`);
+        if (updateBaselines) {
+            console.warn(`⚠️ [Auto-Accept Visual Baselines] --update-baselines has no effect on the standalone (--trace/--spec) flow for "${specPath}" — the raw trace.zip doesn't carry the expected/actual PNG attachment paths needed to locate the baseline. Use the --report / runReportFix batch flow instead. Falling back to manual review.`);
+        }
         const visualHandoffFix = {
             specPath,
             explanation: 'Visual regression detected — code-level repair skipped. Review the pixel diff artifacts and update the baseline snapshot or fix the UI as appropriate.',
@@ -702,6 +754,10 @@ if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('src/cli/fix
     let tracePath = '';
     let specPath = '';
     let reportPath = '';
+    // "Auto-Accept Visual Baselines": --update-baselines, forwarded here by
+    // action.yml (from the `update-visual-baselines` input) and by
+    // src/cli/index.ts's `shorky run --heal --update-baselines` invocation.
+    let updateBaselines = false;
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '--trace' && args[i + 1]) {
             tracePath = args[i + 1];
@@ -715,21 +771,24 @@ if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('src/cli/fix
             reportPath = args[i + 1];
             i++;
         }
+        else if (args[i] === '--update-baselines') {
+            updateBaselines = true;
+        }
     }
     if (reportPath) {
-        runReportFix({ reportPath }).catch((err) => {
+        runReportFix({ reportPath, updateBaselines }).catch((err) => {
             console.error('❌ Unhandled error in runReportFix:', err);
             process.exit(1);
         });
     }
     else if (tracePath && specPath) {
-        runOfflineFix({ tracePath, specPath }).catch((err) => {
+        runOfflineFix({ tracePath, specPath, updateBaselines }).catch((err) => {
             console.error('❌ Unhandled error in runOfflineFix:', err);
             process.exit(1);
         });
     }
     else {
-        console.error('❌ Usage: npx tsx src/cli/fixTrace.ts --report <path> OR --trace <path> --spec <path>');
+        console.error('❌ Usage: npx tsx src/cli/fixTrace.ts --report <path> OR --trace <path> --spec <path> [--update-baselines]');
         process.exit(1);
     }
 }

@@ -11,8 +11,11 @@
 //   npm test
 import { test, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
-import { collectFailedSpecsFromReport, notifyShorkyCloudBatch } from '../fixTrace';
+import { collectFailedSpecsFromReport, notifyShorkyCloudBatch, updateVisualBaseline } from '../fixTrace';
 import type { HealedFixEntry } from '../../utils/githubPr';
 
 type FetchArgs = [input: string | URL | Request, init?: RequestInit];
@@ -225,4 +228,53 @@ test('notifyShorkyCloudBatch: does nothing (no fetch calls) when there are no no
   await notifyShorkyCloudBatch([], 'shared-run-id');
 
   assert.equal(fetchMock.mock.calls.length, 0);
+});
+
+// --- updateVisualBaseline: "Auto-Accept Visual Baselines" -----------------
+
+function makeTempDir(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'shorky-visual-baseline-'));
+}
+
+test('updateVisualBaseline: overwrites the baseline PNG with the actual screenshot bytes', () => {
+  const dir = makeTempDir();
+  try {
+    const expectedPath = path.join(dir, '__snapshots__', 'example.spec.ts', 'sample.png');
+    const actualPath = path.join(dir, 'test-results', 'sample-actual.png');
+
+    fs.mkdirSync(path.dirname(expectedPath), { recursive: true });
+    fs.mkdirSync(path.dirname(actualPath), { recursive: true });
+    fs.writeFileSync(expectedPath, Buffer.from('old-baseline-bytes'));
+    fs.writeFileSync(actualPath, Buffer.from('new-actual-bytes'));
+
+    const result = updateVisualBaseline({ expectedPath, actualPath });
+
+    assert.equal(result, true, 'should report success when both paths exist');
+    assert.equal(fs.readFileSync(expectedPath, 'utf-8'), 'new-actual-bytes', 'baseline should now contain the actual screenshot bytes');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('updateVisualBaseline: returns false and leaves nothing changed when expectedPath/actualPath are missing', () => {
+  assert.equal(updateVisualBaseline(undefined), false);
+  assert.equal(updateVisualBaseline({}), false);
+  assert.equal(updateVisualBaseline({ expectedPath: '/tmp/does-not-matter.png' }), false);
+});
+
+test('updateVisualBaseline: returns false when the actual screenshot does not exist on disk', () => {
+  const dir = makeTempDir();
+  try {
+    const expectedPath = path.join(dir, 'sample.png');
+    const actualPath = path.join(dir, 'sample-actual.png'); // never created
+
+    fs.writeFileSync(expectedPath, Buffer.from('old-baseline-bytes'));
+
+    const result = updateVisualBaseline({ expectedPath, actualPath });
+
+    assert.equal(result, false);
+    assert.equal(fs.readFileSync(expectedPath, 'utf-8'), 'old-baseline-bytes', 'baseline must be left untouched on failure');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

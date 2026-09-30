@@ -12,9 +12,19 @@ This repository is part of the 3-repo Shorky ecosystem.
 
 > **Note:** An earlier "Phase 1" MVP explored a different architecture — a ReAct-style AI agent that drove a live Playwright browser session and a code-synthesis step (`generator.ts`) that converted the recorded agent trace into a static spec. That exploratory-agent/record-replay pipeline (`src/agent/`, `scripts/generate-test.ts`, `scripts/test-fixer.ts`) has been deleted as vestigial scaffolding never wired into the finalized fail-and-rewrite architecture below. If "generate my first test suite from a live site" becomes a real product surface again, it should be redesigned fresh rather than resurrected from this history.
 
-It is also distributed as a **composite GitHub Action** (`action.yml`) — "Shorky AI Test Auto-Healer" — that parses a Playwright JSON report after a CI failure, resolves the failing spec + trace.zip, asks an LLM to generate a code fix (or flags a visual regression for human review), applies the fix, and opens/updates a consolidated pull request. It optionally reports telemetry to a companion SaaS, `shorky-cloud`. Before any of that LLM repair logic runs, both the CLI (`shorky run --heal`) and the GitHub Action (`fixTrace.ts`) perform a **pre-flight governance check** (`src/cli/preflight.ts`) against `shorky-cloud`'s tier-aware, always-200 `/api/v1/governance/preflight` endpoint — a JSON body with `allowExecution: false` (Pro-tier monthly token budget exceeded) aborts the repair loop before any OpenAI call is made and fails the CI job normally. The same check's `acceptsTelemetry`/`storage` fields are also used to skip the `/api/v1/telemetry` POST entirely once a free-tier project has exhausted its cloud storage quota (`cloudReporter.ts`), and to print a "⚠️ 8,200/10,000 free telemetry events used"-style banner in the CLI (`src/cli/index.ts`).
+It is also distributed as a **composite GitHub Action** (`action.yml`) — "Shorky AI Test Auto-Healer" — that parses a Playwright JSON report after a CI failure, resolves the failing spec + trace.zip, asks an LLM to generate a code fix (or handles a visual regression — see "Auto-Accept Visual Baselines" below), applies the fix, and opens/updates a consolidated pull request. It optionally reports telemetry to a companion SaaS, `shorky-cloud`. Before any of that LLM repair logic runs, both the CLI (`shorky run --heal`) and the GitHub Action (`fixTrace.ts`) perform a **pre-flight governance check** (`src/cli/preflight.ts`) against `shorky-cloud`'s tier-aware, always-200 `/api/v1/governance/preflight` endpoint — a JSON body with `allowExecution: false` (Pro-tier monthly token budget exceeded) aborts the repair loop before any OpenAI call is made and fails the CI job normally. The same check's `acceptsTelemetry`/`storage` fields are also used to skip the `/api/v1/telemetry` POST entirely once a free-tier project has exhausted its cloud storage quota (`cloudReporter.ts`), and to print a "⚠️ 8,200/10,000 free telemetry events used"-style banner in the CLI (`src/cli/index.ts`).
 
-The `shorky` CLI (`dist/cli/index.js`, source `src/cli/index.ts`) wraps `npx playwright test` with flags for self-healing (`--heal`), AI vision assertions (`--vision`), headed mode, and generate-only mode (`--generate-only`, which just skips cloud telemetry persistence for that run — it is unrelated to the deleted agent-driven spec-generation pipeline).
+The `shorky` CLI (`dist/cli/index.js`, source `src/cli/index.ts`) wraps `npx playwright test` with flags for self-healing (`--heal`), AI vision assertions (`--vision`), headed mode, generate-only mode (`--generate-only`, which just skips cloud telemetry persistence for that run — it is unrelated to the deleted agent-driven spec-generation pipeline), and visual-baseline auto-acceptance (`--update-baselines`, see below).
+
+### Visual Regressions: Manual Review vs. "Auto-Accept Visual Baselines"
+
+By default, a visual regression (screenshot/pixel-diff) failure is never code-repaired by the LLM — a genuine pixel discrepancy can't be fixed by adjusting selectors/actions — and is instead flagged in the consolidated PR body's "🖼️ [Visual Review Required]" section for a human to manually review the diff artifacts and update the baseline snapshot if the new UI is correct (`isVisualRegressionFailure()` in `src/engine/traceParser.ts` detects these via the `toHaveScreenshot`/`toMatchSnapshot`/`pixelmatch` error message signature).
+
+Opting into `--update-baselines` (CLI) / `update-visual-baselines: true` (GitHub Action input) elevates this into a first-class **"Auto-Accept Visual Baselines"** workflow instead: `runReportFix()` in `src/cli/fixTrace.ts` calls `updateVisualBaseline()`, which copies the newly captured "actual" screenshot (`visualDiff.actualPath`, written by Playwright under `test-results/<test-dir>/`) directly over the local baseline PNG on disk (`visualDiff.expectedPath`, the exact file under `__snapshots__/` that `toHaveScreenshot()` compares against — these paths are extracted from the JSON report's `-expected.png`/`-actual.png` attachments by `extractVisualDiffArtifacts()`). The resulting `HealedFixEntry` carries `baselineUpdated: true`, which:
+- makes `stageHealingFix()` (`src/utils/githubPr.ts`) `git add`/`git commit` the overwritten binary PNG onto the shared `shorky/auto-heal-fixes` branch (git handles binary files transparently — no special flags needed), instead of skipping the commit step entirely as it does for un-updated visual-regression handoff entries; and
+- makes `buildPrBody()` list the entry under a distinct "🖼️ Auto-Updated Visual Baselines" PR section, separate from both LLM code fixes and any remaining "[Visual Review Required]" entries.
+
+This is only supported by the report-driven batch flow (`runReportFix`/`--report`) — the standalone single-trace flow (`runOfflineFix`/`--trace --spec`) parses only the raw `trace.zip`, which doesn't carry the expected/actual PNG attachment paths Playwright only records on the JSON report, so `--update-baselines` on that path just logs a warning and falls back to manual review.
 
 ## Core Development Rules
 
@@ -44,6 +54,8 @@ The `shorky` CLI (`dist/cli/index.js`, source `src/cli/index.ts`) wraps `npx pla
 - **Run tests:** `npm test` (runs `node --import tsx --test` against every discovered `__tests__/*.test.ts` file) or `npm run test:watch` for watch mode.
 - **Mocking:** use `node:test`'s built-in `mock.method()` to stub `global.fetch` (or other I/O) rather than adding a mocking library — see `src/cli/__tests__/preflight.test.ts` for the established pattern (mock `fetch`, snapshot/restore `process.env` in `beforeEach`/`afterEach`, `mock.restoreAll()` in `afterEach`).
 - **Coverage today:** `src/cli/__tests__/preflight.test.ts` covers `runPreflightCheck()`'s full contract — success (`200`), hard-stop failures (`402`/`429`, including malformed-body fallback messages), fail-open behavior (timeout, connection-refused, unexpected `5xx`/`401`), and the skip path (no API key / cloud disabled, asserting `fetch` is never called).
+- **Cross-browser Playwright matrix:** `playwright.config.ts` defines three projects — `Google Chrome`, `firefox`, and `webkit` — and CI (`.github/workflows/playwright.yml`) runs `npx playwright install --with-deps` followed by a bare `npx playwright test` (no `--project` filter), so the full matrix executes on every push/PR to validate Shorky's trace.zip parsing (`traceParser.ts`) and DOM snapshot extraction across all three browser engines, not just Chromium. The Shorky Auto-Healer step (`action.yml` → `fixTrace.ts`) operates purely off the Playwright JSON report + trace.zip paths, so it works identically regardless of which project/browser produced the failure.
+- **Local hardware constraints:** developers whose machines can't launch Firefox/WebKit locally (missing system deps, ARM/sandboxing issues, etc.) can scope any command to just the Chromium-based project by appending `--project="Google Chrome"` — e.g. `npx playwright test --project="Google Chrome"` or `npx tsx src/cli/index.ts run --heal --project="Google Chrome"` (the CLI's `--project` flag is optional and, when omitted, now delegates to `playwright.config.ts`'s full projects array instead of hardcoding Chrome). Full cross-browser coverage still runs in CI regardless.
 
 ## Verification Checklist (run before finishing ANY task)
 
@@ -69,11 +81,20 @@ npm run build
 # Run the Shorky CLI directly from source (no compile step) — dev convenience script
 npm run shorky           # -> tsx src/cli/index.ts
 
-# Run the CLI's own subcommands (after building, or via tsx)
-npx tsx src/cli/index.ts run [test-pattern] --project "Google Chrome" [--heal] [--vision] [--headed] [--generate-only]
+# Run the CLI's own subcommands (after building, or via tsx). --project is
+# optional — omit it to run the full playwright.config.ts matrix (Google
+# Chrome, firefox, webkit), or pass it to scope to a single browser project.
+npx tsx src/cli/index.ts run [test-pattern] [--project "Google Chrome"] [--heal] [--vision] [--headed] [--generate-only]
 
-# Run Playwright tests directly
+# Run Playwright tests directly across the full browser matrix (Google
+# Chrome, firefox, webkit) — this is what CI runs
+npx playwright test
+# (equivalent convenience script: npm run test:playwright)
+
+# Local hardware constraints: developers who can't launch Firefox/WebKit
+# locally can scope to just the Chromium-based project instead:
 npx playwright test --project="Google Chrome"
+# (equivalent convenience script: npm run test:playwright:chrome)
 
 # Run the offline trace-fix analyzer manually (what action.yml invokes in CI)
 npx tsx src/cli/fixTrace.ts --report test-results/report.json

@@ -90,7 +90,11 @@ async function findExistingOpenPr(owner, repo, headBranch, baseBranch, githubTok
 function buildPrBody(fixes, repoRoot) {
     const toRelative = (specPath) => path_1.default.isAbsolute(specPath) ? path_1.default.relative(repoRoot, specPath) : specPath;
     const codeFixes = fixes.filter((fix) => !fix.isVisualRegression);
-    const visualFixes = fixes.filter((fix) => fix.isVisualRegression);
+    // "Auto-Accept Visual Baselines" entries (baselineUpdated: true) are
+    // rendered in their own distinct PR section below, separate from
+    // visual regressions still awaiting manual human review.
+    const visualFixes = fixes.filter((fix) => fix.isVisualRegression && !fix.baselineUpdated);
+    const autoUpdatedBaselineFixes = fixes.filter((fix) => fix.isVisualRegression && fix.baselineUpdated);
     // Group code fixes by specPath: a single file can now have multiple
     // HealedFixEntry records — one per originally-failing test (see
     // fixTrace.ts's `additionalFailingTests` aggregation) — but they all
@@ -149,9 +153,40 @@ function buildPrBody(fixes, repoRoot) {
             .filter(Boolean)
             .join('\n');
     });
+    // "Auto-Accept Visual Baselines" — entries where update-baselines was
+    // enabled and Shorky successfully overwrote the local baseline PNG with
+    // the newly captured "actual" screenshot. Rendered distinctly from both
+    // LLM code fixes and unresolved visual regressions, since no code was
+    // changed and no manual review decision is required — just a visual
+    // confirmation that the new baseline is correct.
+    const autoUpdatedBaselineSections = autoUpdatedBaselineFixes.map((fix) => {
+        const diff = fix.visualDiff || {};
+        return [
+            `### \`${toRelative(fix.specPath)}\``,
+            '',
+            'Shorky detected a **visual regression** for this test and automatically accepted the new ' +
+                'screenshot as the updated baseline (opted in via `--update-baselines` / `update-visual-baselines`). ' +
+                'The baseline PNG below has been overwritten and is included in this PR — please give it a quick ' +
+                'visual look before merging.',
+            '',
+            diff.expectedPath ? `- **Updated baseline:** \`${toRelative(diff.expectedPath)}\`` : null,
+            diff.actualPath ? `- **Source (actual) screenshot:** \`${diff.actualPath}\`` : null,
+            fix.errorLog ? `\n**Original failure:**\n\`\`\`\n${fix.errorLog}\n\`\`\`` : '',
+        ]
+            .filter((line) => line !== null && line !== undefined)
+            .filter(Boolean)
+            .join('\n');
+    });
     const sections = [];
     if (codeSections.length > 0) {
         sections.push('## 🩹 Code Fixes', '', ...codeSections);
+    }
+    if (autoUpdatedBaselineSections.length > 0) {
+        if (sections.length > 0)
+            sections.push('');
+        sections.push('## 🖼️ Auto-Updated Visual Baselines', '', 'The following visual regression(s) were automatically accepted as the new baseline — the ' +
+            '"actual" screenshot from the failing run was written over the local baseline PNG and is ' +
+            'staged in this PR for review.', '', ...autoUpdatedBaselineSections);
     }
     if (visualSections.length > 0) {
         if (sections.length > 0)
@@ -163,6 +198,8 @@ function buildPrBody(fixes, repoRoot) {
     const summaryParts = [];
     if (codeFixes.length > 0)
         summaryParts.push(`${codeFixes.length} code fix(es)`);
+    if (autoUpdatedBaselineFixes.length > 0)
+        summaryParts.push(`${autoUpdatedBaselineFixes.length} visual baseline(s) auto-updated`);
     if (visualFixes.length > 0)
         summaryParts.push(`${visualFixes.length} visual regression(s) flagged for review`);
     return [
@@ -206,10 +243,29 @@ function stageHealingFix(fix) {
         }
     }
     if (fix.isVisualRegression) {
-        // Visual Diff Handoff: no code was generated or file modified for this
-        // failure, so there is nothing to git-add/commit. It's still included
-        // in the consolidated PR body (via buildPrBody) under the
-        // "[Visual Review Required]" section for human review.
+        if (fix.baselineUpdated && fix.visualDiff?.expectedPath) {
+            // "Auto-Accept Visual Baselines": fixTrace.ts has already overwritten
+            // the local baseline PNG (visualDiff.expectedPath) on disk with the
+            // newly captured "actual" screenshot. Stage + commit that binary PNG
+            // just like a code fix, so it's included in the consolidated PR. `git
+            // add` handles binary files (including PNGs) transparently — no
+            // special flags are required, unlike a manual diff/patch-based
+            // staging approach.
+            const relativeBaselinePath = path_1.default.isAbsolute(fix.visualDiff.expectedPath)
+                ? path_1.default.relative(repoRoot, fix.visualDiff.expectedPath)
+                : fix.visualDiff.expectedPath;
+            if (!stagedSpecPaths.has(relativeBaselinePath)) {
+                git(['add', relativeBaselinePath], repoRoot);
+                const commitMessage = `fix(auto-heal): auto-accept visual baseline for ${relativeSpecPath}\n\n${fix.explanation}`;
+                git(['commit', '-m', commitMessage], repoRoot);
+                stagedSpecPaths.add(relativeBaselinePath);
+            }
+            return;
+        }
+        // Visual Diff Handoff (no auto-accept): no code was generated or file
+        // modified for this failure, so there is nothing to git-add/commit.
+        // It's still included in the consolidated PR body (via buildPrBody)
+        // under the "[Visual Review Required]" section for human review.
         return;
     }
     // A single spec file can now produce multiple HealedFixEntry records —
@@ -270,7 +326,10 @@ async function pushConsolidatedHealingBranch(fixes) {
     catch {
         // If we can't determine this (e.g. base branch ref unavailable locally),
         // fall through and let the push/PR attempt below surface any real error.
-        commitsAhead = fixes.some((f) => !f.isVisualRegression) ? 1 : 0;
+        // Both plain code fixes AND auto-accepted visual baselines (which stage
+        // a real PNG commit — see stageHealingFix) count as real commits here;
+        // only un-updated visual-regression handoff entries produce no commit.
+        commitsAhead = fixes.some((f) => !f.isVisualRegression || f.baselineUpdated) ? 1 : 0;
     }
     if (commitsAhead === 0) {
         console.log(`ℹ️ No code changes to commit — ${fixes.length} fix(es) were all visual regressions flagged for human review:`);

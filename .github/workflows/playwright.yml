@@ -32,18 +32,22 @@ jobs:
         run: npm ci
 
       - name: Install Playwright Browsers
-        run: npx playwright install --with-deps chrome
+        run: npx playwright install --with-deps
 
       # 0. Run unit/mock tests (node:test, no external framework) — covers
       # src/cli/preflight.ts's budget-guard contract (200/402/429/fail-open).
       - name: Run unit tests
         run: npm test
 
-      # 1. Run Playwright tests (relies on playwright.config.ts for reporters)
+      # 1. Run Playwright tests across the full browser matrix defined in
+      # playwright.config.ts (Google Chrome, firefox, webkit) — no --project
+      # flag here so CI always exercises cross-browser trace.zip parsing and
+      # DOM snapshot extraction, even though local dev hardware may only be
+      # able to run the Chromium project (see CLINE.md's Testing section).
       - name: Run Shorky Playwright Tests
         run: |
           mkdir -p test-results
-          npx playwright test --project="Google Chrome"
+          npx playwright test
 
       # 2. Dispatch failure telemetry / auto-heal logic via local action
       - name: Run Shorky Cloud Telemetry & Auto-Healer
