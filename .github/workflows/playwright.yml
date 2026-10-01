@@ -51,7 +51,7 @@ jobs:
 
       # 2. Dispatch failure telemetry / auto-heal logic via local action
       - name: Run Shorky Cloud Telemetry & Auto-Healer
-        if: failure() && github.event_name == 'push'
+        if: failure() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: ./
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

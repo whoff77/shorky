@@ -160,6 +160,84 @@ test('collectFailedSpecsFromReport: reproduces the reported scenario — 5 faili
   assert.equal(uniqueSpecPaths.size, 4, 'the 5 failures should map back to exactly 4 distinct spec files');
 });
 
+// --- collectFailedSpecsFromReport: cross-browser matrix dedup ------------
+
+test('collectFailedSpecsFromReport: a test failing on Chrome, firefox, AND webkit is only processed ONCE', () => {
+  const makeBrowserTest = (projectName: string, message: string) => ({
+    projectName,
+    results: [{ status: 'failed', error: { message } }],
+  });
+
+  const report = {
+    suites: [
+      {
+        specs: [
+          {
+            file: 'checkout-flow.spec.ts',
+            title: 'checkout flow should complete',
+            // Playwright's JSON reporter merges every project's run of the
+            // same spec+title into ONE shared `tests[]` array — one entry
+            // per browser, in whatever order the workers happened to finish.
+            tests: [
+              makeBrowserTest('webkit', 'Element detached from DOM'),
+              makeBrowserTest('firefox', 'Timed out waiting for selector'),
+              makeBrowserTest('Google Chrome', 'Button not clickable'),
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  const failures = collectFailedSpecsFromReport(report as any);
+
+  assert.equal(failures.length, 1, 'a single test failing across 3 browsers must only be processed once');
+  assert.equal(failures[0].testTitle, 'checkout flow should complete');
+});
+
+test('collectFailedSpecsFromReport: prefers the Chromium instance\'s error/trace even when it is NOT the first browser seen', () => {
+  const report = {
+    suites: [
+      {
+        specs: [
+          {
+            file: 'checkout-flow.spec.ts',
+            title: 'checkout flow should complete',
+            tests: [
+              {
+                projectName: 'webkit',
+                results: [
+                  {
+                    status: 'failed',
+                    error: { message: 'webkit error' },
+                    attachments: [{ name: 'trace', path: '/tmp/webkit-trace.zip' }],
+                  },
+                ],
+              },
+              {
+                projectName: 'Google Chrome',
+                results: [
+                  {
+                    status: 'failed',
+                    error: { message: 'chrome error' },
+                    attachments: [{ name: 'trace', path: '/tmp/chrome-trace.zip' }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  const failures = collectFailedSpecsFromReport(report as any);
+
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].errorLog, 'chrome error', 'the Chromium instance\'s trace/error is preferred over webkit\'s, regardless of array order');
+  assert.equal(failures[0].traceZipPath, '/tmp/chrome-trace.zip');
+});
+
 // --- notifyShorkyCloudBatch: no silent drops -----------------------------
 
 function makeHealedFix(overrides: Partial<HealedFixEntry>): HealedFixEntry {

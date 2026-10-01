@@ -214,6 +214,15 @@ interface ReportResult {
 
 interface ReportTest {
   results?: ReportResult[];
+  /**
+   * The Playwright project (browser) this particular attempt ran under
+   * (e.g. "Google Chrome", "firefox", "webkit" — see playwright.config.ts's
+   * `projects`). Playwright's JSON reporter merges every project's run of
+   * the SAME spec+title into one shared `ReportSpec.tests[]` array (see
+   * `_mergeTestsFromSuite` in @playwright/test's runner), so a single spec
+   * can carry one `ReportTest` entry per browser here.
+   */
+  projectName?: string;
 }
 
 interface ReportSpec {
@@ -330,16 +339,39 @@ function extractVisualDiffArtifacts(attachments: ReportAttachment[] | undefined)
  * composite-key dedup logic directly without going through the full
  * `runReportFix()` CLI flow.
  */
+/**
+ * True when `projectName` looks like Playwright's Chromium-based project
+ * (e.g. "chromium", "Google Chrome", "Microsoft Edge") — the one browser
+ * whose trace.zip is guaranteed to parse cleanly for DOM/selector context
+ * (see runOfflineFix()'s trace-parsing path), so it's always preferred as
+ * the "primary" browser instance when the SAME test fails across multiple
+ * browsers in the matrix.
+ */
+function isChromiumLikeProject(projectName: string | undefined): boolean {
+  if (!projectName) return false;
+  return /chrom|edge/i.test(projectName);
+}
+
 export function collectFailedSpecsFromReport(report: PlaywrightJsonReport): FailedSpecInfo[] {
   // Keyed by a COMPOSITE `${resolvedSpecPath}::${testTitle}` key so that
   // (a) multiple retries of the exact same test never produce duplicate
-  // entries, but (b) multiple DISTINCT failing tests inside the same spec
-  // file (e.g. two failing `test(...)` blocks in dynamic-form-elements.spec.ts)
+  // entries, (b) multiple DISTINCT failing tests inside the same spec file
+  // (e.g. two failing `test(...)` blocks in dynamic-form-elements.spec.ts)
   // are each preserved as their own entry rather than the second one being
-  // silently dropped. Keying by specPath alone here was the root cause of
-  // failing tests going missing from both the healing pass and the
-  // telemetry payload whenever a single file had more than one failure.
+  // silently dropped, AND (c) the SAME test failing across multiple
+  // browsers in the matrix (Chrome/firefox/webkit — see
+  // playwright.config.ts's `projects`) collapses into a SINGLE entry
+  // instead of triggering the LLM fixer 3 separate times for one broken
+  // spec. Keying by specPath alone here was the root cause of failing
+  // tests going missing from both the healing pass and the telemetry
+  // payload whenever a single file had more than one failure.
   const failuresBySpec = new Map<string, FailedSpecInfo>();
+  // Tracks which browser project "won" the dedupeKey slot currently held in
+  // `failuresBySpec`, so a later-seen Chromium-based attempt can still
+  // DISPLACE an earlier-seen non-Chromium one (webkit/firefox) — Chromium's
+  // trace.zip is the one guaranteed to parse cleanly, so it's always
+  // preferred as the primary instance regardless of iteration order.
+  const winningProjectByKey = new Map<string, string | undefined>();
 
   function walk(suite: ReportSuite) {
     for (const spec of suite.specs || []) {
@@ -382,9 +414,22 @@ export function collectFailedSpecsFromReport(report: PlaywrightJsonReport): Fail
         // first failure recorded for a given (file, test) pair so retries of
         // the exact same test never produce duplicate entries, while still
         // preserving every DISTINCT failing test within the same spec file.
+        // When the SAME (file, test) pair shows up again under a DIFFERENT
+        // browser project (the multi-browser matrix), only let a
+        // Chromium-based attempt DISPLACE a non-Chromium one already
+        // recorded — its trace.zip is guaranteed to parse, so the LLM fixer
+        // is invoked exactly once per broken spec using the most reliable
+        // trace available, never once per browser.
         const dedupeKey = `${resolvedSpecPath}::${testTitle || ''}`;
-        if (failuresBySpec.has(dedupeKey)) {
-          continue;
+        const alreadyRecorded = failuresBySpec.has(dedupeKey);
+        if (alreadyRecorded) {
+          const isThisAttemptChromium = isChromiumLikeProject(test.projectName);
+          const winningProjectWasChromium = isChromiumLikeProject(winningProjectByKey.get(dedupeKey));
+          if (winningProjectWasChromium || !isThisAttemptChromium) {
+            continue;
+          }
+          // Fall through: a Chromium-based attempt displaces the
+          // previously-recorded non-Chromium one below.
         }
 
         const errorLog = finalResult.error?.message || finalResult.errors?.[0]?.message;
@@ -416,6 +461,7 @@ export function collectFailedSpecsFromReport(report: PlaywrightJsonReport): Fail
           isVisualRegression: isVisual,
           visualDiff,
         });
+        winningProjectByKey.set(dedupeKey, test.projectName);
       }
     }
 

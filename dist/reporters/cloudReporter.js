@@ -44,22 +44,33 @@ function extractTokensUsed(result) {
 class ShorkyCloudReporter {
     apiEndpoint;
     apiKey;
-    // Accumulates ONE entry per test, keyed by `test.id` (a stable,
-    // Playwright-assigned identifier — see TestCase.id — unique within the
-    // session, unlike `test.title` which can collide across describe blocks/
-    // projects). Playwright invokes `onTestEnd()` once per ATTEMPT — the
-    // initial run plus every retry (see @playwright/test's runner, which
-    // calls `reporter.onTestEnd?.(test, result)` synchronously after each
-    // attempt finishes) — and, critically, `result` is ALREADY the last
-    // element of `test.results` at the moment ANY attempt's `onTestEnd`
-    // fires (Playwright appends it in `_onTestBegin()`, before the attempt
-    // even runs). That means a "is this the final attempt?" check comparing
+    // Accumulates ONE entry per LOGICAL test, keyed by a COMPOSITE
+    // `${test.location.file}::${test.title}` string — deliberately NOT
+    // `test.id`, because `test.id` is unique per (file, title, PROJECT)
+    // triple (see TestCase.id), so the same test running across the
+    // Chrome/firefox/webkit matrix (playwright.config.ts's `projects`)
+    // produces a DIFFERENT `test.id` per browser. Keying by `test.id` was
+    // the root cause of a single broken test across 3 browsers showing up
+    // as 3 separate telemetry failures and triggering 3 separate auto-heal
+    // attempts. Keying by file+title instead means every browser's attempt
+    // at the SAME test converges on the same Map entry.
+    //
+    // Playwright invokes `onTestEnd()` once per ATTEMPT — the initial run
+    // plus every retry (see @playwright/test's runner, which calls
+    // `reporter.onTestEnd?.(test, result)` synchronously after each attempt
+    // finishes) — and, critically, `result` is ALREADY the last element of
+    // `test.results` at the moment ANY attempt's `onTestEnd` fires
+    // (Playwright appends it in `_onTestBegin()`, before the attempt even
+    // runs). That means a "is this the final attempt?" check comparing
     // `result` against `test.results[test.results.length - 1]` is always
     // true and never actually filters anything out — the real fix is to
     // never treat any individual `onTestEnd()` call as final. Instead, each
-    // call simply OVERWRITES this test's entry in the Map with the latest
-    // snapshot; by definition, whatever is in the Map when `onEnd()` finally
-    // reads it reflects each test's LAST (i.e. final/terminal) attempt.
+    // call OVERWRITES only its own browser's slot (see
+    // `TestRunItem.browserResults`, keyed by `test.id`, which IS stable
+    // across retries of the SAME browser) — so retries of one browser never
+    // clobber another browser's already-recorded outcome for the same test
+    // — and the merged `status`/`error`/`tokensUsed` across ALL browsers is
+    // recomputed every time from `browserResults`.
     testResultsById = new Map();
     constructor() {
         this.apiEndpoint = (0, shorkyCloud_1.getShorkyCloudTelemetryUrl)();
@@ -95,7 +106,8 @@ class ShorkyCloudReporter {
         }
         // outcome() === 'skipped' intentionally leaves testStatus at its
         // 'passed' default, matching this reporter's previous behavior for
-        // skipped/interrupted results.
+        // skipped/interrupted results. NOTE: this is THIS BROWSER'S status —
+        // see the merge step below for how it's combined across all browsers.
         // Combine the error message from EVERY attempt failed SO FAR (not just
         // this one) so the final overwritten entry reflects the full retry
         // history once the last attempt's onTestEnd() call overwrites it. Each
@@ -111,24 +123,59 @@ class ShorkyCloudReporter {
         // actually DIFFER from one another; otherwise just report the single
         // shared message once.
         const uniqueFailedMessages = Array.from(new Set(cleanedFailedMessages));
-        const errorMessage = uniqueFailedMessages.length > 1
+        const combinedBrowserMessage = uniqueFailedMessages.length > 1
             ? cleanedFailedMessages.map((msg, i) => `[Attempt ${i + 1}/${cleanedFailedMessages.length}] ${msg}`).join('\n')
-            : uniqueFailedMessages[0] ?? resolveCleanErrorMessage(result);
+            : uniqueFailedMessages[0] ?? (testStatus === 'failed' ? resolveCleanErrorMessage(result) : undefined);
+        // Prefix with the Playwright project (browser) name — e.g. "[firefox]
+        // ..." — so once this browser's message is merged alongside every
+        // OTHER browser's message for the same logical test below, the
+        // combined log explicitly lists which browser(s) failed instead of
+        // presenting one anonymous, ambiguous error string.
+        const projectName = test.parent.project()?.name || 'unknown';
+        const browserErrorMessage = combinedBrowserMessage !== undefined ? `[${projectName}] ${combinedBrowserMessage}` : undefined;
         // Tokens are attached per-attempt (see autoHealFixture.ts); sum across
-        // every attempt observed so far so retried self-healing spend is never
-        // undercounted once only the final overwritten entry is read back.
-        const tokensUsed = test.results.reduce((sum, r) => sum + extractTokensUsed(r), 0);
-        // OVERWRITE (never push/append) this test's entry, keyed by its stable
-        // `test.id`. A retried test's earlier attempt(s) already wrote an
-        // entry here; this attempt's call simply replaces it, so whatever
-        // remains in the Map once the whole run ends is each test's single,
-        // final-attempt snapshot — never duplicated per retry.
-        this.testResultsById.set(test.id, {
-            title: test.title,
+        // every attempt observed so far, for THIS browser, so retried
+        // self-healing spend is never undercounted once only the final
+        // overwritten slot is read back.
+        const browserTokensUsed = test.results.reduce((sum, r) => sum + extractTokensUsed(r), 0);
+        // Deduplicate the multi-browser matrix: a single logical test run
+        // across Chrome/firefox/webkit (see playwright.config.ts's `projects`)
+        // produces a SEPARATE `TestCase` — with its own distinct `test.id` —
+        // per browser. Keying this outer Map by `${file}::${title}` instead of
+        // `test.id` means every browser's TestCase converges on the SAME
+        // `TestRunItem`, collapsing N browser failures into 1 telemetry entry.
+        const testKey = `${test.location.file}::${test.title}`;
+        let item = this.testResultsById.get(testKey);
+        if (!item) {
+            item = { title: test.title, status: 'passed', tokensUsed: 0, browserResults: new Map() };
+            this.testResultsById.set(testKey, item);
+        }
+        // OVERWRITE (never push/append) only THIS BROWSER's slot, keyed by its
+        // own stable `test.id`. A retried attempt of the SAME browser already
+        // wrote a slot here; this call simply replaces it. A DIFFERENT browser
+        // running the identical test writes to its own distinct slot instead,
+        // so one browser's retries can never clobber another browser's
+        // already-recorded outcome.
+        item.browserResults.set(test.id, {
             status: testStatus,
-            error: errorMessage,
-            tokensUsed,
+            error: browserErrorMessage,
+            tokensUsed: browserTokensUsed,
         });
+        // Re-derive the merged, cross-browser view from scratch every time a
+        // browser's slot changes: if ANY browser ultimately failed, the test
+        // as a whole is reported as failed (a passing Chrome run must never
+        // mask a genuine Firefox/WebKit failure); tokens are summed across
+        // every browser; and every browser's (already browser-prefixed) error
+        // message is combined into one log entry.
+        const browserSnapshots = Array.from(item.browserResults.values());
+        item.status = browserSnapshots.some((b) => b.status === 'failed')
+            ? 'failed'
+            : browserSnapshots.some((b) => b.status === 'healed')
+                ? 'healed'
+                : 'passed';
+        item.tokensUsed = browserSnapshots.reduce((sum, b) => sum + b.tokensUsed, 0);
+        const combinedMessages = browserSnapshots.map((b) => b.error).filter((msg) => !!msg);
+        item.error = combinedMessages.length > 0 ? combinedMessages.join('\n') : undefined;
     }
     async onEnd(result) {
         const cloudUrl = (0, shorkyCloud_1.getShorkyCloudTelemetryUrl)();
@@ -156,11 +203,13 @@ class ShorkyCloudReporter {
             console.log(`📤 [Shorky Cloud] Transmitting run artifacts to ${cloudUrl}...`);
             // Read the accumulated per-test Map back out ONLY here, once the
             // entire run has finished — every test's entry has by now been
-            // overwritten down to its single final-attempt snapshot (see
-            // onTestEnd()'s doc comment), so `testItems` below is naturally
-            // deduplicated with exactly one record per test, and the
-            // passed/failed totals computed from it are never inflated by
-            // retries.
+            // overwritten down to its single final-attempt snapshot PER BROWSER,
+            // then merged across every browser that ran it (see onTestEnd()'s
+            // doc comment and the `browserResults` merge step), so `testItems`
+            // below is naturally deduplicated with exactly one record per
+            // LOGICAL test — not one per (test, browser, retry) combination —
+            // and the passed/failed totals computed from it are never inflated
+            // by retries OR by the multi-browser matrix.
             const testItems = Array.from(this.testResultsById.values());
             const passedCount = testItems.filter((item) => item.status === 'passed').length;
             const failedCount = testItems.filter((item) => item.status === 'failed').length;

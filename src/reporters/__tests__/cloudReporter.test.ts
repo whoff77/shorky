@@ -54,13 +54,30 @@ function makeResult(overrides: Partial<any> = {}): any {
   };
 }
 
-/** Minimal TestCase stub whose `results` array + `outcome()` mimic Playwright's real semantics. */
-function makeTestCase(id: string, title: string, results: any[], outcome: 'expected' | 'unexpected' | 'flaky' | 'skipped'): any {
+/**
+ * Minimal TestCase stub whose `results` array + `outcome()` mimic
+ * Playwright's real semantics. `file`/`projectName` default to a single
+ * fixed spec file and "Google Chrome" so existing single-browser tests
+ * don't need to change, but can be overridden to simulate the SAME
+ * logical test (same file + title) running under a DIFFERENT browser
+ * project — each such TestCase gets its own distinct `id`, exactly like
+ * real Playwright does across its multi-browser matrix.
+ */
+function makeTestCase(
+  id: string,
+  title: string,
+  results: any[],
+  outcome: 'expected' | 'unexpected' | 'flaky' | 'skipped',
+  options: { file?: string; projectName?: string } = {}
+): any {
+  const { file = 'tests/example.spec.ts', projectName = 'Google Chrome' } = options;
   return {
     id,
     title,
     results,
     outcome: () => outcome,
+    location: { file, line: 1, column: 1 },
+    parent: { project: () => ({ name: projectName }) },
   };
 }
 
@@ -175,6 +192,80 @@ test('onTestEnd + onEnd: two DIFFERENT tests each retried produce exactly two te
   assert.equal(payload.failedCount, 1);
 });
 
+test('onTestEnd + onEnd: the SAME test failing across Chrome, Firefox, and WebKit is collapsed into ONE tests[] entry', async () => {
+  const reporter = new ShorkyCloudReporter();
+
+  const sharedFile = 'tests/cross-browser.spec.ts';
+  const sharedTitle = 'checkout flow should complete';
+
+  const chromeResult = makeResult({ status: 'failed', error: { message: 'Button not clickable' } });
+  const chromeTest = makeTestCase('chrome-id', sharedTitle, [chromeResult], 'unexpected', {
+    file: sharedFile,
+    projectName: 'Google Chrome',
+  });
+
+  const firefoxResult = makeResult({ status: 'failed', error: { message: 'Button not clickable' } });
+  const firefoxTest = makeTestCase('firefox-id', sharedTitle, [firefoxResult], 'unexpected', {
+    file: sharedFile,
+    projectName: 'firefox',
+  });
+
+  const webkitResult = makeResult({ status: 'failed', error: { message: 'Element detached from DOM' } });
+  const webkitTest = makeTestCase('webkit-id', sharedTitle, [webkitResult], 'unexpected', {
+    file: sharedFile,
+    projectName: 'webkit',
+  });
+
+  // Each browser project produces its OWN TestCase (distinct `id`), exactly
+  // as Playwright's real multi-browser matrix does — but all three share
+  // the same spec file + title.
+  reporter.onTestEnd(chromeTest, chromeResult);
+  reporter.onTestEnd(firefoxTest, firefoxResult);
+  reporter.onTestEnd(webkitTest, webkitResult);
+
+  const payload = await runOnEndAndCapturePayload(reporter);
+
+  assert.equal(payload.tests.length, 1, 'a single test failing across 3 browsers must collapse into ONE telemetry entry');
+  assert.equal(payload.failedCount, 1, 'failedCount must only be incremented once for this test, not once per browser');
+  assert.equal(payload.passedCount, 0);
+  assert.equal(payload.tests[0].testName, sharedTitle);
+  assert.equal(payload.tests[0].status, 'failed');
+
+  const combinedMessage = payload.tests[0].traceLogs[0]?.message ?? '';
+  assert.match(combinedMessage, /\[Google Chrome\] Button not clickable/);
+  assert.match(combinedMessage, /\[firefox\] Button not clickable/);
+  assert.match(combinedMessage, /\[webkit\] Element detached from DOM/);
+});
+
+test('onTestEnd + onEnd: a test passing on Chrome but failing on Firefox is still reported as FAILED overall', async () => {
+  const reporter = new ShorkyCloudReporter();
+
+  const sharedFile = 'tests/cross-browser.spec.ts';
+  const sharedTitle = 'mixed-outcome test';
+
+  const chromeResult = makeResult({ status: 'passed', error: undefined });
+  const chromeTest = makeTestCase('chrome-id-2', sharedTitle, [chromeResult], 'expected', {
+    file: sharedFile,
+    projectName: 'Google Chrome',
+  });
+
+  const firefoxResult = makeResult({ status: 'failed', error: { message: 'Timed out waiting for selector' } });
+  const firefoxTest = makeTestCase('firefox-id-2', sharedTitle, [firefoxResult], 'unexpected', {
+    file: sharedFile,
+    projectName: 'firefox',
+  });
+
+  reporter.onTestEnd(chromeTest, chromeResult);
+  reporter.onTestEnd(firefoxTest, firefoxResult);
+
+  const payload = await runOnEndAndCapturePayload(reporter);
+
+  assert.equal(payload.tests.length, 1, 'still a single merged entry for the one logical test');
+  assert.equal(payload.tests[0].status, 'failed', 'any failing browser must mark the merged test as failed overall');
+  assert.equal(payload.failedCount, 1);
+  assert.equal(payload.passedCount, 0);
+});
+
 test('onTestEnd + onEnd: a single-attempt (no retries) passing test still emits exactly one record', async () => {
   const reporter = new ShorkyCloudReporter();
 
@@ -203,7 +294,7 @@ test('onTestEnd + onEnd: strips ANSI color escape codes from the error message',
   const payload = await runOnEndAndCapturePayload(reporter);
   const message = payload.tests[0].traceLogs[0]?.message ?? '';
 
-  assert.equal(message, 'Test timeout of 30000ms exceeded.');
+  assert.equal(message, '[Google Chrome] Test timeout of 30000ms exceeded.');
   assert.doesNotMatch(message, /\x1b\[/, 'no raw ANSI escape sequence should remain in the stored message');
   assert.doesNotMatch(message, /\[31m|\[39m/, 'no visible "[31m"-style leftover should remain either');
 });
@@ -227,7 +318,7 @@ test('onTestEnd + onEnd: does NOT add "[Attempt N/M]" prefixes when every retry 
   const payload = await runOnEndAndCapturePayload(reporter);
   const message = payload.tests[0].traceLogs[0]?.message ?? '';
 
-  assert.equal(message, 'Test timeout of 30000ms exceeded.');
+  assert.equal(message, '[Google Chrome] Test timeout of 30000ms exceeded.');
   assert.doesNotMatch(message, /\[Attempt/, 'identical errors across retries must not be prefixed with attempt numbers');
 });
 
