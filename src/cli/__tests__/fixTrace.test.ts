@@ -15,8 +15,15 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { collectFailedSpecsFromReport, notifyShorkyCloudBatch, updateVisualBaseline } from '../fixTrace';
+import {
+  collectFailedSpecsFromReport,
+  notifyShorkyCloudBatch,
+  updateVisualBaseline,
+  computeStage1Telemetry,
+  dispatchStage1Telemetry,
+} from '../fixTrace';
 import type { HealedFixEntry } from '../../utils/githubPr';
+import type { PreflightResult } from '../preflight';
 
 type FetchArgs = [input: string | URL | Request, init?: RequestInit];
 
@@ -355,4 +362,223 @@ test('updateVisualBaseline: returns false when the actual screenshot does not ex
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- computeStage1Telemetry: Stage 1 "run artifacts" telemetry -----------
+//
+// Regression coverage for the architectural fix described in the task:
+// since GitHub Action consumers never load `cloudReporter.ts`, Stage 1
+// telemetry must be computed directly from the Playwright JSON report by
+// `fixTrace.ts` itself.
+
+function makeMinimalReport(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    stats: { duration: 12345 },
+    suites: [],
+    ...overrides,
+  };
+}
+
+test('computeStage1Telemetry: counts passed/failed tests and reports run duration from report.stats', () => {
+  const report = makeMinimalReport({
+    suites: [
+      {
+        specs: [
+          {
+            file: 'login.spec.ts',
+            title: 'user should be able to log in',
+            tests: [{ status: 'expected', results: [{ status: 'passed' }] }],
+          },
+          {
+            file: 'checkout.spec.ts',
+            title: 'checkout should fail gracefully',
+            tests: [
+              {
+                status: 'unexpected',
+                results: [{ status: 'failed', error: { message: 'Timeout exceeded' } }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  const result = computeStage1Telemetry(report as any);
+
+  assert.equal(result.passedCount, 1);
+  assert.equal(result.failedCount, 1);
+  assert.equal(result.durationMs, 12345);
+  assert.equal(result.tests.length, 2);
+
+  const failedEntry = result.tests.find((t) => t.testName === 'checkout should fail gracefully');
+  assert.ok(failedEntry, 'failed test entry should exist');
+  assert.equal(failedEntry!.status, 'failed');
+  assert.equal(failedEntry!.traceLogs[0]?.message, 'Timeout exceeded');
+
+  const passedEntry = result.tests.find((t) => t.testName === 'user should be able to log in');
+  assert.ok(passedEntry, 'passed test entry should exist');
+  assert.equal(passedEntry!.status, 'passed');
+  assert.deepEqual(passedEntry!.traceLogs, []);
+});
+
+test('computeStage1Telemetry: treats "flaky" and "skipped" as passed, matching cloudReporter.ts semantics', () => {
+  const report = makeMinimalReport({
+    suites: [
+      {
+        specs: [
+          {
+            file: 'flaky.spec.ts',
+            title: 'eventually passes after a retry',
+            tests: [{ status: 'flaky', results: [{ status: 'failed' }, { status: 'passed' }] }],
+          },
+          {
+            file: 'skipped.spec.ts',
+            title: 'intentionally skipped test',
+            tests: [{ status: 'skipped', results: [] }],
+          },
+        ],
+      },
+    ],
+  });
+
+  const result = computeStage1Telemetry(report as any);
+
+  assert.equal(result.passedCount, 2);
+  assert.equal(result.failedCount, 0);
+});
+
+test('computeStage1Telemetry: deduplicates a test run across multiple browser projects, failing if ANY browser failed', () => {
+  const report = makeMinimalReport({
+    suites: [
+      {
+        specs: [
+          {
+            file: 'cross-browser.spec.ts',
+            title: 'renders the homepage',
+            tests: [
+              { status: 'expected', projectName: 'Google Chrome', results: [{ status: 'passed' }] },
+              {
+                status: 'unexpected',
+                projectName: 'firefox',
+                results: [{ status: 'failed', error: { message: 'Firefox-only failure' } }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  const result = computeStage1Telemetry(report as any);
+
+  assert.equal(result.tests.length, 1, 'both browser runs of the same test must merge into a single entry');
+  assert.equal(result.passedCount, 0);
+  assert.equal(result.failedCount, 1);
+  assert.equal(result.tests[0].traceLogs[0]?.message, 'Firefox-only failure');
+});
+
+test('computeStage1Telemetry: recurses into nested suites', () => {
+  const report = makeMinimalReport({
+    suites: [
+      {
+        specs: [],
+        suites: [
+          {
+            specs: [
+              {
+                file: 'nested.spec.ts',
+                title: 'nested suite test',
+                tests: [{ status: 'expected', results: [{ status: 'passed' }] }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  const result = computeStage1Telemetry(report as any);
+
+  assert.equal(result.tests.length, 1);
+  assert.equal(result.passedCount, 1);
+});
+
+// --- dispatchStage1Telemetry: gating + payload dispatch -------------------
+
+function makePreflight(overrides: Partial<PreflightResult> = {}): PreflightResult {
+  return { ok: true, skipped: false, ...overrides };
+}
+
+test('dispatchStage1Telemetry: does not call fetch when SHORKY_CLOUD_API_KEY is not configured', async () => {
+  delete process.env.SHORKY_CLOUD_API_KEY;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => jsonResponse(200, { success: true }));
+
+  await dispatchStage1Telemetry(makeMinimalReport() as any, 'run-id-1', makePreflight());
+
+  assert.equal(fetchMock.mock.calls.length, 0);
+});
+
+test('dispatchStage1Telemetry: does not call fetch when preflight.acceptsTelemetry is explicitly false', async () => {
+  process.env.SHORKY_CLOUD_API_KEY = 'test-key';
+  const fetchMock = mock.method(globalThis, 'fetch', async () => jsonResponse(200, { success: true }));
+
+  await dispatchStage1Telemetry(
+    makeMinimalReport() as any,
+    'run-id-2',
+    makePreflight({ acceptsTelemetry: false, message: 'quota reached' })
+  );
+
+  assert.equal(fetchMock.mock.calls.length, 0);
+});
+
+test('dispatchStage1Telemetry: POSTs the telemetry payload to getShorkyCloudTelemetryUrl() when enabled and accepted', async () => {
+  process.env.SHORKY_CLOUD_API_KEY = 'test-key';
+  process.env.GITHUB_REPOSITORY = 'whoff77/shorky';
+
+  let capturedUrl: string | URL | Request | undefined;
+  let capturedBody: any;
+  const fetchMock = mock.method(globalThis, 'fetch', async (input: FetchArgs[0], init?: FetchArgs[1]) => {
+    capturedUrl = input;
+    capturedBody = JSON.parse((init?.body as string) || '{}');
+    return jsonResponse(200, { success: true });
+  });
+
+  const report = makeMinimalReport({
+    stats: { duration: 5000 },
+    suites: [
+      {
+        specs: [
+          {
+            file: 'a.spec.ts',
+            title: 'a passing test',
+            tests: [{ status: 'expected', results: [{ status: 'passed' }] }],
+          },
+        ],
+      },
+    ],
+  });
+
+  await dispatchStage1Telemetry(report as any, 'shared-run-id', makePreflight({ acceptsTelemetry: true }));
+
+  assert.equal(fetchMock.mock.calls.length, 1);
+  assert.match(String(capturedUrl), /\/api\/v1\/telemetry$/);
+  assert.equal(capturedBody.runId, 'shared-run-id');
+  assert.equal(capturedBody.repoOwner, 'whoff77');
+  assert.equal(capturedBody.repoName, 'shorky');
+  assert.equal(capturedBody.passedCount, 1);
+  assert.equal(capturedBody.failedCount, 0);
+  assert.equal(capturedBody.durationMs, 5000);
+  assert.equal(capturedBody.status, 'passed');
+});
+
+test('dispatchStage1Telemetry: gracefully warns (does not throw) when the cloud endpoint is unreachable', async () => {
+  process.env.SHORKY_CLOUD_API_KEY = 'test-key';
+  mock.method(globalThis, 'fetch', async () => {
+    throw new Error('network down');
+  });
+
+  await assert.doesNotReject(
+    dispatchStage1Telemetry(makeMinimalReport() as any, 'run-id-3', makePreflight())
+  );
 });

@@ -6,6 +6,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.notifyShorkyCloudBatch = notifyShorkyCloudBatch;
 exports.updateVisualBaseline = updateVisualBaseline;
 exports.collectFailedSpecsFromReport = collectFailedSpecsFromReport;
+exports.computeStage1Telemetry = computeStage1Telemetry;
+exports.dispatchStage1Telemetry = dispatchStage1Telemetry;
 exports.runReportFix = runReportFix;
 exports.runOfflineFix = runOfflineFix;
 const fs_1 = __importDefault(require("fs"));
@@ -346,6 +348,159 @@ function collectFailedSpecsFromReport(report) {
     return Array.from(failuresBySpec.values());
 }
 /**
+ * Recursively walks every spec/test in a parsed Playwright JSON report
+ * (not just the failures `collectFailedSpecsFromReport()` extracts) and
+ * resolves each LOGICAL test's final passed/failed outcome and error
+ * message — mirroring `cloudReporter.ts`'s retry-safe,
+ * multi-browser-matrix-safe accumulation logic, but sourced from the
+ * static `report.json` file instead of live `TestCase`/`TestResult`
+ * objects (since this function runs as a separate CLI process, after the
+ * Playwright run that produced the report has already exited).
+ *
+ * Deduplicates by a composite `${file}::${title}` key exactly like
+ * `collectFailedSpecsFromReport()`'s `dedupeKey`, so a test that ran across
+ * multiple browser projects (see playwright.config.ts's `projects`)
+ * contributes exactly ONE entry to `tests[]` — failed if ANY browser
+ * ultimately failed it, passed otherwise. Playwright's own `ReportTest`
+ * `status` field already reflects the retry-resolved final verdict for
+ * each (spec, browser) pair (mirroring `TestCase.outcome()`), so no
+ * additional retry-attempt inspection is needed here.
+ */
+function computeStage1Telemetry(report) {
+    const testsByKey = new Map();
+    function resolveStatus(test) {
+        return test.status === 'unexpected' ? 'failed' : 'passed';
+    }
+    function resolveErrorMessage(test) {
+        const results = test.results || [];
+        const finalResult = results[results.length - 1];
+        return finalResult?.error?.message || finalResult?.errors?.[0]?.message;
+    }
+    function buildTraceLogs(message) {
+        return message
+            ? [
+                {
+                    step: 1,
+                    action: 'test_execution',
+                    status: 'failed',
+                    timestamp: new Date().toISOString(),
+                    message,
+                },
+            ]
+            : [];
+    }
+    function walk(suite) {
+        for (const spec of suite.specs || []) {
+            for (const test of spec.tests || []) {
+                const resolvedSpecPath = (0, traceParser_1.resolveSpecSourcePath)(spec.file) || spec.file || 'unknown-spec';
+                const testTitle = spec.title || 'unknown-test';
+                const key = `${resolvedSpecPath}::${testTitle}`;
+                const status = resolveStatus(test);
+                const errorMessage = status === 'failed' ? resolveErrorMessage(test) : undefined;
+                const existing = testsByKey.get(key);
+                if (!existing) {
+                    testsByKey.set(key, {
+                        testName: testTitle,
+                        status,
+                        traceLogs: buildTraceLogs(errorMessage),
+                        selfHealingCount: 0,
+                        tokensUsed: 0,
+                    });
+                    continue;
+                }
+                // A DIFFERENT browser project running the same logical test: if
+                // THIS browser failed, the merged entry must be reported failed
+                // even if an earlier browser in iteration order passed — a passing
+                // Chrome run must never mask a genuine Firefox/WebKit failure.
+                if (status === 'failed' && existing.status !== 'failed') {
+                    existing.status = 'failed';
+                    existing.traceLogs = buildTraceLogs(errorMessage);
+                }
+            }
+        }
+        for (const child of suite.suites || []) {
+            walk(child);
+        }
+    }
+    for (const suite of report.suites || []) {
+        walk(suite);
+    }
+    const tests = Array.from(testsByKey.values());
+    const passedCount = tests.filter((t) => t.status === 'passed').length;
+    const failedCount = tests.filter((t) => t.status === 'failed').length;
+    const durationMs = Math.round(report.stats?.duration ?? 0);
+    return { passedCount, failedCount, durationMs, tests };
+}
+/**
+ * POSTs Stage 1 run-level telemetry to shorky-cloud's `/api/v1/telemetry`
+ * directly from the GitHub Action process — see the comment block above
+ * `Stage1TestEntry` for why this is necessary (consumers never load
+ * `cloudReporter.ts`). Reuses the EXACT `preflight` result already
+ * resolved once at the top of `runReportFix()` rather than issuing a
+ * second `/api/v1/governance/preflight` round-trip, and gates the POST the
+ * same way `cloudReporter.ts`'s `onEnd()` does: skipped entirely when
+ * cloud reporting isn't configured, or when the governance check has
+ * explicitly signaled `acceptsTelemetry: false` (a free-tier project over
+ * its cloud storage quota).
+ */
+async function dispatchStage1Telemetry(report, suiteRunId, preflight) {
+    if (!(0, shorkyCloud_1.isShorkyCloudEnabled)()) {
+        console.log('ℹ️ [Shorky Cloud] Telemetry transmission skipped (SHORKY_CLOUD_API_KEY not configured).');
+        return;
+    }
+    if (preflight.acceptsTelemetry === false) {
+        console.log(`ℹ️ [Shorky Cloud] Skipping telemetry transmission: ${preflight.message || 'free tier cloud storage quota reached.'}`);
+        return;
+    }
+    const cloudUrl = (0, shorkyCloud_1.getShorkyCloudTelemetryUrl)();
+    try {
+        console.log(`📤 [Shorky Cloud] Transmitting run artifacts...`);
+        const { passedCount, failedCount, durationMs, tests } = computeStage1Telemetry(report);
+        const [repoOwner, repoName] = (0, gitContext_1.resolveRepositoryName)().split('/');
+        const telemetryPayload = {
+            projectName: process.env.SHORKY_PROJECT_NAME || 'shorky',
+            repoOwner,
+            repoName,
+            runId: suiteRunId,
+            status: failedCount > 0 ? 'failed' : 'passed',
+            passedCount,
+            failedCount,
+            durationMs,
+            tokensUsed: 0,
+            tests,
+        };
+        const response = await fetch(cloudUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-shorky-api-key': (0, shorkyCloud_1.getShorkyCloudApiKey)(),
+            },
+            body: JSON.stringify(telemetryPayload),
+            // Short timeout so an offline/unreachable cloud endpoint never stalls
+            // the CI job this runs inside.
+            signal: AbortSignal.timeout(3000),
+        });
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            console.error('⚠️ [Shorky Cloud] Backend responded with status:', response.status, JSON.stringify(errorData, null, 2));
+        }
+        else {
+            console.log('✅ [Shorky Cloud] Telemetry successfully transmitted.');
+            (0, shorkyCloud_1.logDashboardCallToAction)();
+        }
+    }
+    catch (error) {
+        // Gracefully log offline status without throwing an unhandled stack
+        // trace — a failed Stage 1 dispatch must never abort the healing run.
+        if (error?.cause?.code === 'ECONNREFUSED' || error?.name === 'TimeoutError') {
+            console.warn('ℹ️ [Shorky Cloud] Cloud server unavailable. Continuing offline execution.');
+        }
+        else {
+            console.warn('⚠️ [Shorky Cloud] Telemetry warning:', error?.message || error);
+        }
+    }
+}
+/**
  * Resolves the single shared run identifier that every worker/spec in this
  * Playwright execution should be tagged with, so that a multi-worker run
  * (see `shorky-test-consumer`'s `workers` config) still produces ONE batch
@@ -410,6 +565,12 @@ async function runReportFix({ reportPath, updateBaselines = false }) {
     // and which single runId every fix in this run should be tagged with.
     console.log(`🧭 [Diagnostic] runReportFix() starting — batchMode=true (enforced) for all specs in this report, suiteRunId="${suiteRunId}".`);
     const report = JSON.parse(fs_1.default.readFileSync(absoluteReportPath, 'utf-8'));
+    // Stage 1 telemetry — dispatched here (rather than relying on
+    // cloudReporter.ts, which consumer repos never load — see the comment
+    // block above Stage1TestEntry) immediately after the report is parsed,
+    // reusing the preflight check already performed above, and BEFORE the
+    // LLM repair loop below ever starts.
+    await dispatchStage1Telemetry(report, suiteRunId, preflight);
     const failures = collectFailedSpecsFromReport(report);
     if (failures.length === 0) {
         console.log('✅ No failed tests found in report. Nothing to do.');
