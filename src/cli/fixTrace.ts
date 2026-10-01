@@ -14,6 +14,7 @@ import { HealedFixEntry, openHealingPullRequest, pushConsolidatedHealingBranch, 
 import { overwriteSpecInPlace } from '../utils/specWriter';
 import { resolveRepositoryName } from '../utils/gitContext';
 import { getExecutionId } from '../utils/executionId';
+import { stripAnsiCodes, resolveCleanErrorMessage } from '../utils/format';
 
 import dotenv from 'dotenv';
 dotenv.config();
@@ -458,7 +459,11 @@ export function collectFailedSpecsFromReport(report: PlaywrightJsonReport): Fail
           // previously-recorded non-Chromium one below.
         }
 
-        const errorLog = finalResult.error?.message || finalResult.errors?.[0]?.message;
+        // ANSI-stripped (see ../utils/format) so neither the `/api/webhook`
+        // payload's `errorLog` nor the dashboard UI it feeds ever displays
+        // raw terminal color escape codes (e.g. "[31m") — this is the exact
+        // same cleanup `cloudReporter.ts` applies to live TestResults.
+        const errorLog = resolveCleanErrorMessage(finalResult);
 
         // Detect visual regression (screenshot/pixel-diff) failures so they
         // can be routed into "Visual Diff Handoff" mode instead of the
@@ -571,7 +576,12 @@ export function computeStage1Telemetry(report: PlaywrightJsonReport): Stage1Tele
   function resolveErrorMessage(test: ReportTest): string | undefined {
     const results = test.results || [];
     const finalResult = results[results.length - 1];
-    return finalResult?.error?.message || finalResult?.errors?.[0]?.message;
+    if (!finalResult) return undefined;
+    // ANSI-stripped (see ../utils/format) so the `test_execution` trace log
+    // sent in the Stage 1 telemetry payload never surfaces raw terminal
+    // color escape codes on the dashboard — the same cleanup
+    // `cloudReporter.ts` applies to live TestResults.
+    return resolveCleanErrorMessage(finalResult);
   }
 
   function buildTraceLogs(message: string | undefined) {

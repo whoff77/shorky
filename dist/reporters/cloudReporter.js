@@ -5,27 +5,11 @@ const autoHealFixture_1 = require("../fixtures/autoHealFixture");
 const gitContext_1 = require("../utils/gitContext");
 const preflight_1 = require("../cli/preflight");
 const executionId_1 = require("../utils/executionId");
-// Matches ANSI/VT100 escape sequences (e.g. `\u001b[31m`, `\u001b[39m`) that
-// Playwright embeds in `error.message`/`error.stack` for terminal color
-// highlighting (red for failures, etc.). These render as illegible raw
-// codes like "[31m" once persisted as plain text and displayed on the
-// shorky-cloud dashboard, so they're stripped before the message is ever
-// stored/combined.
-// eslint-disable-next-line no-control-regex
-const ANSI_ESCAPE_CODE_RE = /\x1b\[[0-9;]*m/g;
-/** Strips ANSI/VT100 color escape codes from a Playwright error string. */
-function stripAnsiCodes(value) {
-    return value.replace(ANSI_ESCAPE_CODE_RE, '');
-}
-/**
- * Resolves the single displayable error message for a given attempt,
- * stripped of ANSI color codes, falling back to the stack trace or a
- * generic placeholder when no message is available.
- */
-function resolveCleanErrorMessage(result) {
-    const raw = result.error?.message || result.error?.stack || 'Unknown error';
-    return stripAnsiCodes(raw).trim();
-}
+const format_1 = require("../utils/format");
+// ANSI-stripping utilities (`stripAnsiCodes`/`resolveCleanErrorMessage`)
+// now live in `../utils/format` (imported above) so `fixTrace.ts` can apply
+// the exact same cleanup to the `/api/webhook` payload and LLM prompt
+// context, instead of duplicating this logic.
 /**
  * Extracts the LLM token count `autoHealFixture.ts` attached to this test
  * result (see `SHORKY_TOKENS_ATTACHMENT_NAME`), if any. Attachments cross
@@ -115,7 +99,7 @@ class ShorkyCloudReporter {
         // so the stored/dashboard-rendered text never contains raw terminal
         // color codes like "[31m".
         const failedAttempts = test.results.filter((r) => r.status === 'failed' || r.status === 'timedOut');
-        const cleanedFailedMessages = failedAttempts.map(resolveCleanErrorMessage);
+        const cleanedFailedMessages = failedAttempts.map(format_1.resolveCleanErrorMessage);
         // A retried test very often fails with the EXACT same error on every
         // attempt (e.g. the same broken selector timing out identically each
         // time) — in that case there's nothing useful about numbering them, so
@@ -125,7 +109,7 @@ class ShorkyCloudReporter {
         const uniqueFailedMessages = Array.from(new Set(cleanedFailedMessages));
         const combinedBrowserMessage = uniqueFailedMessages.length > 1
             ? cleanedFailedMessages.map((msg, i) => `[Attempt ${i + 1}/${cleanedFailedMessages.length}] ${msg}`).join('\n')
-            : uniqueFailedMessages[0] ?? (testStatus === 'failed' ? resolveCleanErrorMessage(result) : undefined);
+            : uniqueFailedMessages[0] ?? (testStatus === 'failed' ? (0, format_1.resolveCleanErrorMessage)(result) : undefined);
         // Prefix with the Playwright project (browser) name — e.g. "[firefox]
         // ..." — so once this browser's message is merged alongside every
         // OTHER browser's message for the same logical test below, the

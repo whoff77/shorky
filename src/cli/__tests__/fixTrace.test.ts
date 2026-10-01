@@ -245,6 +245,64 @@ test('collectFailedSpecsFromReport: prefers the Chromium instance\'s error/trace
   assert.equal(failures[0].traceZipPath, '/tmp/chrome-trace.zip');
 });
 
+// --- collectFailedSpecsFromReport: ANSI-stripped error messages -----------
+//
+// Regression coverage for the architectural fix described in the task: raw
+// Playwright error strings often contain ANSI/VT100 color escape codes
+// (e.g. `\x1b[31m...\x1b[39m`) that corrupt the dashboard UI and hallucinate
+// the LLM prompt when passed through uncleaned. `collectFailedSpecsFromReport`
+// now runs every `errorLog` through `resolveCleanErrorMessage()` (shared with
+// cloudReporter.ts via ../utils/format), exactly like the live-TestResult
+// path already did.
+
+test('collectFailedSpecsFromReport: strips ANSI color escape codes from errorLog', () => {
+  const report = {
+    suites: [
+      {
+        specs: [
+          {
+            file: 'login.spec.ts',
+            title: 'user should be able to log in',
+            tests: [
+              {
+                results: [
+                  { status: 'failed', error: { message: '\x1b[31mExpected element to be visible\x1b[39m' } },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  const failures = collectFailedSpecsFromReport(report as any);
+
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].errorLog, 'Expected element to be visible');
+});
+
+test('collectFailedSpecsFromReport: falls back to "Unknown error" when no error/errors are present on the final failed attempt', () => {
+  const report = {
+    suites: [
+      {
+        specs: [
+          {
+            file: 'flaky.spec.ts',
+            title: 'times out with no captured error',
+            tests: [{ results: [{ status: 'timedOut' }] }],
+          },
+        ],
+      },
+    ],
+  };
+
+  const failures = collectFailedSpecsFromReport(report as any);
+
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].errorLog, 'Unknown error');
+});
+
 // --- notifyShorkyCloudBatch: no silent drops -----------------------------
 
 function makeHealedFix(overrides: Partial<HealedFixEntry>): HealedFixEntry {
@@ -420,6 +478,31 @@ test('computeStage1Telemetry: counts passed/failed tests and reports run duratio
   assert.ok(passedEntry, 'passed test entry should exist');
   assert.equal(passedEntry!.status, 'passed');
   assert.deepEqual(passedEntry!.traceLogs, []);
+});
+
+test('computeStage1Telemetry: strips ANSI color escape codes from the test_execution trace log message', () => {
+  const report = makeMinimalReport({
+    suites: [
+      {
+        specs: [
+          {
+            file: 'checkout.spec.ts',
+            title: 'checkout should fail gracefully',
+            tests: [
+              {
+                status: 'unexpected',
+                results: [{ status: 'failed', error: { message: '\x1b[31mTimeout exceeded\x1b[39m' } }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  const result = computeStage1Telemetry(report as any);
+
+  assert.equal(result.tests[0].traceLogs[0]?.message, 'Timeout exceeded');
 });
 
 test('computeStage1Telemetry: treats "flaky" and "skipped" as passed, matching cloudReporter.ts semantics', () => {

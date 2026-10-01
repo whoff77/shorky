@@ -6,6 +6,7 @@ import { SHORKY_TOKENS_ATTACHMENT_NAME } from '../fixtures/autoHealFixture';
 import { resolveRepositoryName } from '../utils/gitContext';
 import { runPreflightCheck } from '../cli/preflight';
 import { getExecutionId } from '../utils/executionId';
+import { resolveCleanErrorMessage } from '../utils/format';
 
 /** One browser (Playwright project)'s final snapshot for a given test, after combining all of ITS OWN retry attempts. */
 interface BrowserAttemptSnapshot {
@@ -33,29 +34,10 @@ interface TestRunItem {
   browserResults: Map<string, BrowserAttemptSnapshot>;
 }
 
-// Matches ANSI/VT100 escape sequences (e.g. `\u001b[31m`, `\u001b[39m`) that
-// Playwright embeds in `error.message`/`error.stack` for terminal color
-// highlighting (red for failures, etc.). These render as illegible raw
-// codes like "[31m" once persisted as plain text and displayed on the
-// shorky-cloud dashboard, so they're stripped before the message is ever
-// stored/combined.
-// eslint-disable-next-line no-control-regex
-const ANSI_ESCAPE_CODE_RE = /\x1b\[[0-9;]*m/g;
-
-/** Strips ANSI/VT100 color escape codes from a Playwright error string. */
-function stripAnsiCodes(value: string): string {
-  return value.replace(ANSI_ESCAPE_CODE_RE, '');
-}
-
-/**
- * Resolves the single displayable error message for a given attempt,
- * stripped of ANSI color codes, falling back to the stack trace or a
- * generic placeholder when no message is available.
- */
-function resolveCleanErrorMessage(result: TestResult): string {
-  const raw = result.error?.message || result.error?.stack || 'Unknown error';
-  return stripAnsiCodes(raw).trim();
-}
+// ANSI-stripping utilities (`stripAnsiCodes`/`resolveCleanErrorMessage`)
+// now live in `../utils/format` (imported above) so `fixTrace.ts` can apply
+// the exact same cleanup to the `/api/webhook` payload and LLM prompt
+// context, instead of duplicating this logic.
 
 /**
  * Extracts the LLM token count `autoHealFixture.ts` attached to this test

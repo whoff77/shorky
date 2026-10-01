@@ -20,6 +20,7 @@ const githubPr_1 = require("../utils/githubPr");
 const specWriter_1 = require("../utils/specWriter");
 const gitContext_1 = require("../utils/gitContext");
 const executionId_1 = require("../utils/executionId");
+const format_1 = require("../utils/format");
 const dotenv_1 = __importDefault(require("dotenv"));
 dotenv_1.default.config();
 /**
@@ -308,7 +309,11 @@ function collectFailedSpecsFromReport(report) {
                     // Fall through: a Chromium-based attempt displaces the
                     // previously-recorded non-Chromium one below.
                 }
-                const errorLog = finalResult.error?.message || finalResult.errors?.[0]?.message;
+                // ANSI-stripped (see ../utils/format) so neither the `/api/webhook`
+                // payload's `errorLog` nor the dashboard UI it feeds ever displays
+                // raw terminal color escape codes (e.g. "[31m") — this is the exact
+                // same cleanup `cloudReporter.ts` applies to live TestResults.
+                const errorLog = (0, format_1.resolveCleanErrorMessage)(finalResult);
                 // Detect visual regression (screenshot/pixel-diff) failures so they
                 // can be routed into "Visual Diff Handoff" mode instead of the
                 // normal LLM code-repair flow — adjusting selectors/actions can
@@ -374,7 +379,13 @@ function computeStage1Telemetry(report) {
     function resolveErrorMessage(test) {
         const results = test.results || [];
         const finalResult = results[results.length - 1];
-        return finalResult?.error?.message || finalResult?.errors?.[0]?.message;
+        if (!finalResult)
+            return undefined;
+        // ANSI-stripped (see ../utils/format) so the `test_execution` trace log
+        // sent in the Stage 1 telemetry payload never surfaces raw terminal
+        // color escape codes on the dashboard — the same cleanup
+        // `cloudReporter.ts` applies to live TestResults.
+        return (0, format_1.resolveCleanErrorMessage)(finalResult);
     }
     function buildTraceLogs(message) {
         return message
